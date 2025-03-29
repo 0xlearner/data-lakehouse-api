@@ -1,0 +1,22 @@
+# Lakehouse Pipeline Configuration
+
+[general]
+pipeline_name = "data_lakehouse"
+log_level = "info"
+
+[cities]
+codes = ["69036", "107681", "200253"]
+
+[date]
+year = 2025
+month = 3
+day = 29
+
+[minio]
+endpoint = "http://localhost:9000"
+access_key = "access_key"
+secret_key = "secret_key"
+source_bucket = "food-panda-vendors"
+bronze_bucket = "bronze"
+metadata_bucket = "metadata"
+region = "us-east-1"

@@ -1,0 +1,36 @@
+# ETL Pipeline Configuration
+
+[general]
+pipeline_name = "foodpanda_etl"
+log_level = "info"
+output_dir = "/app/data"
+
+[cities]
+codes = ["69036", "107681", "200253"]
+
+[date]
+year = 2025
+month = 3
+day = 17
+
+[minio]
+endpoint = "http://localhost:9000"
+access_key = "access_key"
+secret_key = "secret_key"
+source_bucket = "food-panda-vendors"
+bronze_bucket = "bronze"
+metadata_bucket = "metadata"
+region = "us-east-1"
+
+[api.headers]
+perseus-client-id = "1737108613136.802524900772077665.hi5re1m8x0"
+perseus-session-id = "1741721494639.068659692962093299.uzsw4zna3p"
+x-disco-client-id = "web"
+x-fp-api-key = "volo"
+x-pd-language-id = "1"
+
+[storage]
+# Storage-specific configurations for ETL pipeline
+format = "parquet"
+compression = "snappy"
+partition_by = ["date", "city"]

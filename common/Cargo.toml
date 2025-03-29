@@ -1,0 +1,46 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Data Processing
+arrow.workspace = true
+parquet.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Error Handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+#Config
+config.workspace = true
+
+
+# AWS
+aws-sdk-s3.workspace = true
+aws-smithy-runtime-api.workspace = true
+aws-config.workspace = true
+
+
+#rquest
+rquest.workspace = true
+
+#tokio
+tokio.workspace = true
+
+#DataFusion
+datafusion.workspace = true
+
+#ObjectStore
+object_store.workspace = true
+
+url.workspace = true
