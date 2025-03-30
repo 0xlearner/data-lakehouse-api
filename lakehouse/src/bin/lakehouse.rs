@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Processing data for city: {} ({}/{:02}/{:02})", 
                 city, year, month, day);
                 
-        match lakehouse.process_city_data(city, year, month, day).await {
+        match lakehouse.process_city_data(city, year, month, day, None).await {
             Ok(key) => println!("Successfully processed city {} data, stored at: {}", city, key),
             Err(e) => eprintln!("Error processing city {}: {}", city, e),
         }

@@ -79,6 +79,13 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("Duplicate Data: {0}")]
+    DuplicateData(String),
+    #[error("Stale Data: {0}")]
+    StaleData(String),
+    #[error("Internal Error: {0}")]
+    Internal(String),
 }
 
 // Implement From for various SdkError types

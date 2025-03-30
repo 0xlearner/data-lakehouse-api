@@ -1,14 +1,16 @@
 pub mod metadata;
+pub mod deduplication;
+pub use deduplication::DeduplicationValidator;
 mod bronze;
 mod config;
 mod udf;
 
-
-pub use metadata::{ParquetMetadata, MetadataStore, S3MetadataStore};
+pub use metadata::{DatasetMetadata, MetadataRegistry, S3MetadataRegistry};
 pub use bronze::{BronzeProcessor, ProcessedData};
 pub use config::StorageConfig;
 use crate::storage::S3Config;
 use crate::storage::S3Manager;
+use crate::storage::s3::ObjectStorage;
 use crate::storage::s3::S3Storage;
 use crate::schema::{
     VendorSchemaVersion, 
@@ -23,7 +25,6 @@ use std::collections::HashMap;
 use datafusion::datasource::{
     file_format::parquet::ParquetFormat,
     listing::{ListingOptions, ListingTable, ListingTableConfig},
-    
 };
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::datasource::TableProvider;
@@ -33,6 +34,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use datafusion::prelude::ParquetReadOptions;
 use arrow::datatypes::DataType;
+use chrono::{DateTime, Utc};
 
 
 /// Main processor interface that coordinates different processing layers
@@ -41,54 +43,92 @@ pub struct LakehouseProcessor {
     schema_cache: RwLock<HashMap<&'static str, Arc<Schema>>>,
     pub s3_manager: Arc<S3Manager>,
     bronze: BronzeProcessor,
-    metadata: S3MetadataStore,
+    metadata_registry: Arc<dyn MetadataRegistry>,
 }
 
 impl LakehouseProcessor {
     pub async fn new(config: &S3Config) -> Result<Self> {
         // Initialize schema cache
         let mut schema_cache = HashMap::new();
-
-        schema_cache.insert("raw_vendors", Arc::new(get_vendor_schema(VendorSchemaVersion::Raw)));
-        schema_cache.insert("bronze_vendors", Arc::new(get_vendor_schema(VendorSchemaVersion::Bronze)));
+        schema_cache.insert(
+            "raw_vendors", 
+            Arc::new(get_vendor_schema(VendorSchemaVersion::Raw).clone())
+        );
+        schema_cache.insert(
+            "bronze_vendors", 
+            Arc::new(get_vendor_schema(VendorSchemaVersion::Bronze).clone())
+        );
 
         let ctx = SessionContext::new();
         let s3_manager = Arc::new(S3Manager::new(config.clone()));
         
-        
         register_udfs(&ctx)?;
 
-        let bronze = BronzeProcessor::new(&ctx, s3_manager.clone());
+        // Create metadata registry
+        let metadata_registry = S3MetadataRegistry::new(
+            Arc::new(S3Storage::new(s3_manager.clone(), &config.metadata_bucket).await?),
+            Arc::new(S3Storage::new(s3_manager.clone(), &config.bronze_bucket).await?),
+        ).await?;
+
+        let metadata_registry = Arc::new(metadata_registry);
+
+        let bronze = BronzeProcessor::new(&ctx, s3_manager.clone(), metadata_registry.clone());
         
         Ok(Self {
             ctx,
             s3_manager: s3_manager.clone(),
             bronze,
-            schema_cache: RwLock::new({
-                let mut schema_cache = HashMap::new();
-                schema_cache.insert("raw_vendors", Arc::new(raw_vendors_schema()));
-                schema_cache.insert("bronze_vendors", Arc::new(bronze_vendors_schema()));
-                schema_cache
-            }),
-            metadata: S3MetadataStore::new(Arc::new(
-                S3Storage::new(s3_manager.clone(), &config.metadata_bucket).await?
-            )),
+            schema_cache: RwLock::new(schema_cache),
+            metadata_registry,
         })
     }
 
     // Simplified processing methods
-    pub async fn process_bronze_data(&self, source_path: &str) -> Result<ProcessedData> {
-        self.bronze.process_data(source_path).await
+    pub async fn process_bronze_data(
+        &self,
+        source_path: &str,
+        city_code: &str,
+        year: i32,
+        month: u32,
+        day: u32,
+        file_content: Option<&[u8]>,
+    ) -> Result<ProcessedData> {
+        self.bronze.process_to_bronze(
+            source_path,
+            "",
+            city_code,
+            year,
+            month,
+            day,
+            file_content,
+        ).await
     }
 
     // Store processed data in the bronze layer
     pub async fn store_bronze_data(
         &self,
         data: ProcessedData,
-        storage_config: &StorageConfig,
-        target_key: &str,
-    ) -> Result<()> {
-        self.bronze.store_data(data, &storage_config.bronze_bucket, target_key).await
+        city_code: &str,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> Result<String> {
+        let timestamp = Utc::now().format("%H%M%S").to_string();
+        let bronze_bucket = &self.s3_manager.config.bronze_bucket;
+        
+        // Construct the proper target key
+        let target_key = format!(
+            "vendors/city_id={}/year={}/month={:02}/day={:02}/{}.parquet",
+            city_code, year, month, day, timestamp
+        );
+    
+        // Create the S3Storage instance and convert to trait object
+        let storage: Arc<dyn ObjectStorage> = Arc::new(S3Storage::new(self.s3_manager.clone(), bronze_bucket).await?);
+        
+        // Store the data - now passing a reference to the trait object
+        self.bronze.store_data(data, &*storage, &target_key).await?;
+        
+        Ok(target_key)
     }
 
     pub async fn register_s3_storage(&self, bucket: &str) -> Result<()> {
@@ -117,6 +157,40 @@ impl LakehouseProcessor {
 
     async fn verify_bucket_access(&self, bucket: &str) -> Result<()> {
         self.s3_manager.verify_bucket_exists(bucket).await
+    }
+
+    pub async fn find_metadata_by_city_date(
+        &self,
+        city_code: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+    ) -> Result<Vec<DatasetMetadata>> {
+        self.metadata_registry.find_metadata_by_city_date(
+            "vendors",
+            city_code,
+            start_date,
+            end_date,
+        ).await
+    }
+
+    pub async fn list_metadata(&self, prefix: &str) -> Result<Vec<DatasetMetadata>> {
+        // First try to list using the registry's direct method if available
+        if let Ok(metadata_list) = self.metadata_registry.list_metadata(prefix).await {
+            return Ok(metadata_list);
+        }
+        
+        // Fallback to manual listing if direct method not available
+        let keys = self.metadata_registry.list_objects(prefix).await?;
+        let mut results = Vec::new();
+        
+        for key in keys {
+            match self.metadata_registry.get_metadata(&key).await {
+                Ok(metadata) => results.push(metadata),
+                Err(e) => println!("Failed to load metadata from {}: {}", key, e),
+            }
+        }
+        
+        Ok(results)
     }
 
     // Universal registration method that handles schema versions
@@ -164,15 +238,10 @@ impl LakehouseProcessor {
         &self,
         storage_config: &StorageConfig,
         metadata_key: &str,
-    ) -> Result<ParquetMetadata> {
+    ) -> Result<DatasetMetadata> {
         let content = storage_config.metadata_bucket.get_object(metadata_key).await?;
-        let metadata: ParquetMetadata = serde_json::from_slice(&content)?;
+        let metadata: DatasetMetadata = serde_json::from_slice(&content)?;
         Ok(metadata)
-    }
-
-    // List metadata for a date range
-    pub async fn list_metadata(&self, prefix: &str) -> Result<Vec<ParquetMetadata>> {
-        self.metadata.list_metadata(prefix).await
     }
 
     // Get the current session context

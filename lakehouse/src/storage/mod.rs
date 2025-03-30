@@ -14,11 +14,12 @@ pub struct S3Config {
     pub access_key: String,
     pub secret_key: String,
     pub metadata_bucket: String,
+    pub bronze_bucket: String,
 }
 
 #[derive(Clone)]
 pub struct S3Manager {
-    config: S3Config,
+    pub config: S3Config,
     client_cache: Arc<dashmap::DashMap<String, Arc<S3Client>>>,
     object_store_cache: Arc<dashmap::DashMap<String, Arc<object_store::aws::AmazonS3>>>,
 }
