@@ -13,6 +13,7 @@ pub struct S3Config {
     pub region: String,
     pub access_key: String,
     pub secret_key: String,
+    pub source_bucket: String,
     pub metadata_bucket: String,
     pub bronze_bucket: String,
 }
@@ -103,6 +104,117 @@ impl S3Manager {
                 "Cannot access bucket '{}': {}",
                 bucket, e
             ))),
+        }
+    }
+
+    pub async fn list_source_files(
+        &self,
+        city_code: &str,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> Result<Vec<String>> {
+        let prefix = format!(
+            "city_id={}/year={}/month={:02}/day={:02}/",
+            city_code, year, month, day
+        );
+
+        let options = ListOptions {
+            prefix: Some(prefix),
+            extensions: Some(vec![".parquet".to_string()]),
+            ..Default::default()
+        };
+
+        self.list_files(&self.config.source_bucket, options).await
+    }
+
+    pub async fn list_bronze_files(
+        &self,
+        city_code: &str,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> Result<Vec<String>> {
+        let prefix = format!(
+            "city_id={}/year={}/month={:02}/day={:02}/",
+            city_code, year, month, day
+        );
+
+        let options = ListOptions {
+            prefix: Some(prefix),
+            extensions: Some(vec![".parquet".to_string()]),
+            ..Default::default()
+        };
+
+        self.list_files(&self.config.bronze_bucket, options).await
+    }
+
+    /// Lists files in a specified bucket with filtering options
+    /// 
+    /// # Arguments
+    /// * `bucket` - The bucket to list files from
+    /// * `options` - Optional filtering and listing parameters
+    pub async fn list_files(&self, bucket: &str, options: ListOptions) -> Result<Vec<String>> {
+        let client = self.get_client(bucket).await?;
+        let mut request = client.list_objects_v2().bucket(bucket);
+    
+        if let Some(ref prefix) = options.prefix {
+            request = request.prefix(prefix);
+        }
+    
+        if let Some(ref delimiter) = options.delimiter {
+            request = request.delimiter(delimiter);
+        }
+    
+        if let Some(max_keys) = options.max_keys {
+            request = request.max_keys(max_keys);
+        }
+    
+        let objects = request.send().await?;
+        let mut files = Vec::new();
+        let contents = objects.contents();
+        if !contents.is_empty() {
+            for object in contents {
+                if let Some(key) = object.key() {
+                    let should_include = match &options.extensions {
+                        Some(extensions) => {
+                            extensions.iter().any(|ext| key.ends_with(ext))
+                        },
+                        None => true,
+                    };
+    
+                    if should_include {
+                        files.push(format!("s3://{}/{}", bucket, key));
+                    }
+                }
+            }
+        }
+    
+        if files.is_empty() {
+            println!("No files found in bucket: {} with prefix: {:?}", 
+                bucket, options.prefix);
+        } else {
+            println!("Found {} files in bucket: {}", files.len(), bucket);
+        }
+    
+        Ok(files)
+    }
+}
+
+pub struct ListOptions {
+    pub prefix: Option<String>,
+    pub delimiter: Option<String>,
+    pub max_keys: Option<i32>,
+    pub extensions: Option<Vec<String>>,
+}
+
+impl Default for ListOptions {
+    fn default() -> Self {
+        Self {
+            prefix: None,
+            delimiter: None,
+            max_keys: None,
+            extensions: None,
         }
     }
 }

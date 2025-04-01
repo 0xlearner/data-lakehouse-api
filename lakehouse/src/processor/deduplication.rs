@@ -11,15 +11,33 @@ impl DeduplicationValidator {
         file_path: &str,
         file_content: &[u8],
     ) -> Result<bool> {
+        // Calculate hash first
         let mut hasher = Sha256::new();
         hasher.update(file_content);
         let file_hash = format!("{:x}", hasher.finalize());
         
-        let existing_by_path = registry.find_metadata_by_source_path(file_path).await?;
+        // Check by content hash first as it's most reliable
         let existing_by_hash = registry.find_metadata_by_content_hash(&file_hash).await?;
+        if !existing_by_hash.is_empty() {
+            return Ok(true);
+        }
         
-        Ok(!existing_by_path.is_empty() || !existing_by_hash.is_empty())
+        // Then check by source path
+        let existing_by_path = registry.find_metadata_by_source_path(file_path).await?;
+        if !existing_by_path.is_empty() {
+            // If found by path, verify the processing timestamp to handle reprocessing cases
+            for metadata in existing_by_path {
+                // If the content hash is different but the path is same,
+                // we might want to allow reprocessing in some cases
+                if metadata.content_hash == file_hash {
+                    return Ok(true);
+                }
+            }
+        }
+        
+        Ok(false)
     }
+
     
     pub async fn check_record_duplicates(
         registry: &dyn MetadataRegistry,

@@ -14,7 +14,7 @@ use datafusion::logical_expr::ExprSchemable;
 use uuid::Uuid;
 use crate::{
     storage::S3Manager,
-    schema::raw_vendors_schema,
+    models::schema::raw_vendors_schema,
 };
 use crate::storage::s3::ObjectStorage;
 use std::sync::Arc;
@@ -23,6 +23,8 @@ use arrow::datatypes::DataType;
 use arrow::datatypes::TimeUnit;
 use arrow::array::StringArray;
 use arrow::array::Array;
+use arrow::datatypes::Field;
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 
 #[derive(Clone)]
 pub struct ProcessedData {
@@ -88,24 +90,14 @@ impl BronzeProcessor {
         // Register source table with raw schema
         self.register_source_table(&temp_table, source_path, &raw_schema).await?;
     
-        // Get all column names from the schema
-        let all_columns: Vec<Expr> = raw_schema.fields()
-            .iter()
-            .map(|f| col(f.name()))
-            .collect();
-
-        // Add ingested_at to the columns
-        let mut columns = all_columns;
-        columns.push(
-            lit(Utc::now().timestamp_millis())
-                .cast_to(&DataType::Timestamp(TimeUnit::Millisecond, None), 
-                    self.ctx.table(&temp_table).await?.schema())?
-                .alias("ingested_at")
-        );
-    
         // Process the data
         let df = self.ctx.table(&temp_table).await?
-            .select(columns)?;
+        .with_column(
+            "ingested_at",
+            lit(Utc::now().timestamp_millis())
+                .cast_to(&DataType::Timestamp(TimeUnit::Millisecond, None), 
+                self.ctx.table(&temp_table).await?.schema())?
+        )?;
 
         let record_ids = self.extract_record_ids(&df).await?;
         let duplicates = DeduplicationValidator::check_record_duplicates(
@@ -123,17 +115,30 @@ impl BronzeProcessor {
         }
     
         // Create metadata
-        let record_count = df.clone().count().await? as u64;
+        let df_schema = df.schema();
+        let fields: Vec<Field> = df_schema.fields()
+            .iter()
+            .map(|field| {
+                let field = field.as_ref();
+                Field::new(
+                    field.name(),
+                    field.data_type().clone(),
+                    field.is_nullable()
+                )
+            })
+            .collect();
+        
+        let arrow_schema = ArrowSchema::new(fields);
         let timestamp = Utc::now().format("%H%M%S").to_string();
         
         let metadata = convert::create_dataset_metadata(
-            &raw_schema,
+            &arrow_schema,
             source_path,
             target_path,
-            record_count,
+            &df,  // Pass the DataFrame
             "bronze",
             file_content,
-        )?;
+        ).await?;
 
         // Store metadata in registry
         let metadata_ref = self.metadata_registry.store_metadata(
@@ -171,42 +176,38 @@ impl BronzeProcessor {
         })
     }
 
-    pub async fn process_data(
-        &self,
-        source_path: &str,
-        city_code: &str,
-        year: i32,
-        month: u32,
-        day: u32,
-        file_content: Option<&[u8]>,
-    ) -> Result<ProcessedData> {
-        self.process_to_bronze(source_path, "", city_code, year, month, day,file_content).await
-    }
-
     pub async fn store_data(
         &self,
         data: ProcessedData,
         storage: &dyn ObjectStorage,
         target_key: &str,
     ) -> Result<()> {
+        let schema = data.df.schema();
         let target_url = format!("s3://{}/{}", storage.bucket(), target_key);
+        
+        // Schema validation
         let required_fields = ["ingested_at", "extraction_started_at", "extraction_completed_at"];
-
         for field in required_fields {
-            if !data.df.schema().fields().iter().any(|f| f.name() == field) {
+            if !schema.fields().iter().any(|f| f.name() == field) {
                 return Err(common::Error::SchemaValidation(
                     format!("Missing required field {} in bronze data", field).into()
                 ));
             }
         }
-        
-        // Validate schema matches bronze before writing
-        if !data.df.schema().fields().iter().any(|f| f.name() == "ingested_at") {
+
+        // Check for null values in ingested_at column
+        let null_count = data.df.clone()
+            .filter(col("ingested_at").is_null())?
+            .count()
+            .await?;
+
+        if null_count > 0 {
             return Err(common::Error::SchemaValidation(
-                "Missing ingested_at field in bronze data".into()
+                format!("Found {} null values in ingested_at column", null_count).into()
             ));
         }
 
+        // Write data after validation
         data.df.write_parquet(
             &target_url,
             DataFrameWriteOptions::new(),
@@ -232,7 +233,8 @@ impl BronzeProcessor {
 
         let options = ParquetReadOptions::default()
             .schema(schema)
-            .table_partition_cols(vec![]);
+            .table_partition_cols(vec![])
+            .file_extension(".parquet");
             
         self.ctx
             .register_parquet(table_name, source_path, options)
@@ -248,26 +250,33 @@ impl BronzeProcessor {
         options
     }
 
+
     async fn verify_file_exists(
         &self,
         storage: &dyn ObjectStorage,
         target_key: &str
     ) -> Result<()> {
-        // Construct full S3 path for verification
-        let full_path = format!("s3://{}/{}", storage.bucket(), target_key);
+        // Remove any s3:// prefix if present
+        let clean_key = target_key.strip_prefix("s3://")
+            .and_then(|s| s.split_once('/'))
+            .map(|(_, key)| key)
+            .unwrap_or(target_key);
+    
+        // Remove any leading slash
+        let clean_key = clean_key.strip_prefix('/').unwrap_or(clean_key);
         
-        // Use the object store's native checking
-        let exists = storage.check_file_exists(target_key).await?;
+        let exists = storage.check_file_exists(clean_key).await?;
         
         if exists {
             Ok(())
         } else {
             Err(common::Error::Storage(format!(
                 "File not found after writing: {}",
-                full_path
+                target_key
             )))
         }
     }
+
 
     async fn extract_record_ids(&self,df: &DataFrame) -> Result<Vec<String>> {
         let id_col = "code";

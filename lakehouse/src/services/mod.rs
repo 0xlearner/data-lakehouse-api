@@ -1,4 +1,5 @@
 pub mod lakehouse;
+pub mod query;
 pub use lakehouse::LakehouseService;
 
 use axum::{

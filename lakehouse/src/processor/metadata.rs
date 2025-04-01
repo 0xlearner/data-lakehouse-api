@@ -11,6 +11,7 @@ use arrow::datatypes::Schema;
 use serde_json::json;
 use sha2::{Sha256, Digest};
 use dashmap::DashMap;
+use datafusion::dataframe::DataFrame;
 
 /// Comprehensive dataset metadata
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,8 +42,6 @@ pub struct DatasetMetadata {
     pub custom_metadata: HashMap<String, String>,
 
     pub content_hash: String,
-
-    pub source_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -107,8 +106,22 @@ pub struct QualityMetrics {
     /// Null value percentage
     pub null_percentage: f64,
     
-    /// Checksum for data validation
+    /// Data checksum (SHA-256 hash of key data properties)
     pub checksum: String,
+
+    /// Timestamp when metrics were calculated
+    pub calculated_at: DateTime<Utc>,
+    
+    /// Column-level statistics
+    pub column_stats: HashMap<String, ColumnStats>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ColumnStats {
+    pub null_count: u64,
+    pub distinct_count: Option<u64>,
+    pub min_value: Option<String>,
+    pub max_value: Option<String>,
 }
 
 /// Lightweight metadata marker stored with data
@@ -195,6 +208,7 @@ impl S3MetadataRegistry {
         registry.build_index().await?;
         Ok(registry)
     }
+
 
     async fn build_index(&self) -> Result<()> {
         let keys = self.registry_store.list_objects("datasets/").await?;
@@ -427,10 +441,14 @@ impl MetadataRegistry for S3MetadataRegistry {
 
     async fn find_metadata_by_source_path(&self, path: &str) -> Result<Vec<DatasetMetadata>> {
         let mut results = Vec::new();
+        // This now consistently uses the same path that was indexed
         if let Some(keys) = self.source_path_index.get(path) {
             for key in keys.value() {
                 if let Ok(metadata) = self.get_metadata(key).await {
-                    results.push(metadata);
+                    // Double check the path matches to be safe
+                    if metadata.lineage.source_path == path {
+                        results.push(metadata);
+                    }
                 }
             }
         }
@@ -471,6 +489,139 @@ impl MetadataRegistry for S3MetadataRegistry {
             }
         }
         Ok(results)
+    }
+}
+
+impl QualityMetrics {
+    pub async fn new(df: &DataFrame) -> Result<Self> {
+        // Get record batches
+        let batches = df.clone().collect().await?;
+        
+        // Calculate overall metrics
+        let record_count = batches.iter().map(|b| b.num_rows()).sum::<usize>() as u64;
+        let schema = df.schema();
+        let mut column_stats = HashMap::new();
+        let mut total_nulls = 0u64;
+        
+        // Calculate column-level statistics
+        for (col_idx, field) in schema.fields().iter().enumerate() {
+            let mut null_count = 0u64;
+            let mut distinct_values = std::collections::HashSet::new();
+            let mut min_value: Option<String> = None;
+            let mut max_value: Option<String> = None;
+
+            for batch in &batches {
+                let column = batch.column(col_idx);
+                null_count += column.null_count() as u64;
+
+                // Calculate min/max and distinct values for the column
+                for row_idx in 0..batch.num_rows() {
+                    if !column.is_null(row_idx) {
+                        // Convert value to string based on data type
+                        let value = match column.data_type() {
+                            arrow::datatypes::DataType::Utf8 => {
+                                let array = column.as_any().downcast_ref::<arrow::array::StringArray>()
+                                    .ok_or_else(|| common::Error::Other("Failed to downcast to StringArray".to_string()))?;
+                                array.value(row_idx).to_string()
+                            },
+                            arrow::datatypes::DataType::Int32 => {
+                                let array = column.as_any().downcast_ref::<arrow::array::Int32Array>()
+                                    .ok_or_else(|| common::Error::Other("Failed to downcast to Int32Array".to_string()))?;
+                                array.value(row_idx).to_string()
+                            },
+                            arrow::datatypes::DataType::Int64 => {
+                                let array = column.as_any().downcast_ref::<arrow::array::Int64Array>()
+                                    .ok_or_else(|| common::Error::Other("Failed to downcast to Int64Array".to_string()))?;
+                                array.value(row_idx).to_string()
+                            },
+                            arrow::datatypes::DataType::Float32 => {
+                                let array = column.as_any().downcast_ref::<arrow::array::Float32Array>()
+                                    .ok_or_else(|| common::Error::Other("Failed to downcast to Float32Array".to_string()))?;
+                                array.value(row_idx).to_string()
+                            },
+                            arrow::datatypes::DataType::Float64 => {
+                                let array = column.as_any().downcast_ref::<arrow::array::Float64Array>()
+                                    .ok_or_else(|| common::Error::Other("Failed to downcast to Float64Array".to_string()))?;
+                                array.value(row_idx).to_string()
+                            },
+                            // Add other data types as needed
+                            _ => format!("{:?}", column),
+                        };
+
+                        distinct_values.insert(value.clone());
+                        
+                        if let Some(ref mut min) = min_value {
+                            if &value < min {
+                                *min = value.clone();
+                            }
+                        } else {
+                            min_value = Some(value.clone());
+                        }
+                        
+                        if let Some(ref mut max) = max_value {
+                            if &value > max {
+                                *max = value.clone();
+                            }
+                        } else {
+                            max_value = Some(value.clone());
+                        }
+                    }
+                }
+            }
+
+            total_nulls += null_count;
+            
+            column_stats.insert(field.name().clone(), ColumnStats {
+                null_count,
+                distinct_count: Some(distinct_values.len() as u64),
+                min_value,
+                max_value,
+            });
+        }
+
+        // Calculate overall null percentage
+        let null_percentage = if record_count > 0 {
+            (total_nulls as f64) / (record_count as f64 * schema.fields().len() as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate checksum using key metrics
+        let mut hasher = Sha256::new();
+        
+        // Add record count to checksum
+        hasher.update(record_count.to_le_bytes());
+        
+        // Add schema field names and types to checksum
+        for field in schema.fields() {
+            hasher.update(field.name().as_bytes());
+            hasher.update(format!("{:?}", field.data_type()).as_bytes());
+        }
+
+        // Add column statistics to checksum
+        for (col_name, stats) in &column_stats {
+            hasher.update(col_name.as_bytes());
+            hasher.update(stats.null_count.to_le_bytes());
+            if let Some(distinct) = stats.distinct_count {
+                hasher.update(distinct.to_le_bytes());
+            }
+            if let Some(ref min) = stats.min_value {
+                hasher.update(min.as_bytes());
+            }
+            if let Some(ref max) = stats.max_value {
+                hasher.update(max.as_bytes());
+            }
+        }
+
+        let checksum = format!("{:x}", hasher.finalize());
+
+        Ok(Self {
+            record_count,
+            null_percentage,
+            checksum,
+            calculated_at: Utc::now(),
+            column_stats,
+        })
     }
 }
 
@@ -534,13 +685,13 @@ pub mod convert {
     }
 
     /// Create DatasetMetadata from schema and processing info
-    pub fn create_dataset_metadata(
+    pub async fn create_dataset_metadata(
         schema: &Schema,
         source_path: &str,
         target_path: &str,
-        record_count: u64,
+        df: &DataFrame,  // Changed parameter to accept DataFrame
         layer: &str,
-        file_content: Option<&[u8]>, // Optional for content hashing
+        file_content: Option<&[u8]>,
     ) -> Result<DatasetMetadata> {
         let schema_json = schema_to_json(schema)?;
         
@@ -556,6 +707,9 @@ pub mod convert {
             hasher.update(Utc::now().to_rfc3339().as_bytes());
             format!("{:x}", hasher.finalize())
         };
+
+        // Calculate quality metrics
+        let metrics = QualityMetrics::new(df).await?;
     
         Ok(DatasetMetadata {
             dataset_id: format!("{}_{}", layer, Utc::now().format("%Y%m%d_%H%M%S")),
@@ -574,23 +728,17 @@ pub mod convert {
             },
             processing: ProcessingMetadata {
                 timestamp: Utc::now(),
-                job_id: "bronze_processor".to_string(),
+                job_id: format!("bronze_processor_{}", Utc::now().format("%Y%m%d_%H%M%S")),
                 duration_secs: 0.0,
             },
             governance: GovernanceMetadata {
                 classification: "internal".to_string(),
                 retention_days: 365,
-                owner: "data_team".to_string(),
+                owner: "0xlearner".to_string(), // Use current user
             },
-            metrics: QualityMetrics {
-                record_count,
-                null_percentage: 0.0,
-                checksum: "todo".to_string(),
-            },
+            metrics,
             custom_metadata: HashMap::new(),
             content_hash,
-            source_path: source_path.to_string(), // Added content hash
-            // source_path is already included in LineageMetadata
         })
     }
 }

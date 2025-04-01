@@ -2,7 +2,7 @@ pub mod services;
 pub mod api;
 pub mod processor;
 pub mod storage;
-pub mod schema;
+pub mod models;
 pub mod utils;
 
 
@@ -30,7 +30,7 @@ pub async fn run_lakehouse_pipeline(config_path: &str) -> Result<()> {
         println!("Processing data for city: {} ({}/{:02}/{:02})", 
                 city, year, month, day);
                 
-        match service.process_city_data(city, year, month, day, None).await {
+        match service.process_city_data(city, year, month, day).await {
             Ok(key) => println!("Successfully processed city {} data, stored at: {}", city, key),
             Err(e) => eprintln!("Error processing city {}: {}", city, e),
         }

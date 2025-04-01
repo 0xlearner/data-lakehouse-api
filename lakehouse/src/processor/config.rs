@@ -22,6 +22,7 @@ impl StorageConfig {
             region: settings.minio.region.clone(),
             access_key: settings.minio.access_key.clone(),
             secret_key: settings.minio.secret_key.clone(),
+            source_bucket: settings.minio.source_bucket.clone(),
             bronze_bucket: settings.minio.bronze_bucket.clone(),
             metadata_bucket: settings.minio.metadata_bucket.clone(),
         };

@@ -74,8 +74,14 @@ pub enum Error {
     #[error("Schema mismatch: {0}")]
     SchemaMismatch(String),
 
+    #[error("Schema error: {0}")]
+    SchemaError(String),
+
     #[error("Invalid Uri: {0}")]
     InvalidUri(String),
+
+    #[error("Not found: {0}")]
+    NotFound(String),
 
     #[error("{0}")]
     Other(String),

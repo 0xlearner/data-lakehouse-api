@@ -17,7 +17,7 @@ use crate::services::lakehouse::LakehouseService;
 use super::models::{ApiResponse, VendorQueryParams, DataLayerQuery};
 use crate::services::AppError;
 
-// Unified streaming endpoint for both raw and bronze
+// Unified streaming endpoint for bronze
 pub async fn stream_vendors(
     Path(layer): Path<String>,
     Query(params): Query<VendorQueryParams>,
@@ -28,14 +28,7 @@ pub async fn stream_vendors(
         |(current_offset, service, params, layer)| async move {
             let batch_size = 1000;
             let result = match layer.as_str() {
-                "raw" => service.query_raw_vendors_by_date(
-                    &params.city_id,
-                    params.year,
-                    params.month,
-                    params.day,
-                    batch_size,
-                ).await,
-                "bronze" => service.query_bronze_vendors_by_date(
+                "bronze" => service.query_bronze_data(
                     &params.city_id,
                     params.year,
                     params.month,
@@ -81,15 +74,7 @@ pub async fn query_vendors(
     }
 
     let result = match layer.layer.as_deref().unwrap_or("bronze") {
-        "raw" => service.query_raw_vendors_by_date(
-            &params.city_id,
-            params.year,
-            params.month,
-            params.day,
-            limit,
-        ).await
-        .map_err(AppError::from)?,
-        "bronze" => service.query_bronze_vendors_by_date(
+        "bronze" => service.query_bronze_data(
             &params.city_id,
             params.year,
             params.month,
