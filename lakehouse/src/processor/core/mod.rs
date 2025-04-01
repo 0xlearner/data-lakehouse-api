@@ -12,7 +12,6 @@ use crate::storage::{S3Manager, S3Config};
 use crate::processor::bronze::ProcessedData;
 use crate::models::schema::get_vendor_schema;
 use crate::processor::config::StorageConfig;
-pub use udf::register_udfs;
 use std::sync::RwLock;
 use std::collections::HashMap;
 use arrow::datatypes::Schema;
@@ -44,8 +43,6 @@ impl LakehouseProcessor {
         );
 
         let table_registry = Arc::new(ParquetTableRegistry);
-
-        register_udfs(&ctx)?;
         
         let metadata_registry = Arc::new(S3MetadataRegistry::new(
             Arc::new(S3Storage::new(s3_manager.clone(), &config.metadata_bucket).await?),

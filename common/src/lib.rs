@@ -92,6 +92,8 @@ pub enum Error {
     StaleData(String),
     #[error("Internal Error: {0}")]
     Internal(String),
+    #[error("Data validation error: {0}")]
+    DataValidation(String),
 }
 
 // Implement From for various SdkError types

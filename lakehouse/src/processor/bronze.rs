@@ -25,6 +25,7 @@ use arrow::array::StringArray;
 use arrow::array::Array;
 use arrow::datatypes::Field;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use super::udf;
 
 #[derive(Clone)]
 pub struct ProcessedData {
@@ -45,6 +46,9 @@ impl BronzeProcessor {
         s3_manager: Arc<S3Manager>,
         metadata_registry: Arc<dyn MetadataRegistry>,
     ) -> Self {
+
+        udf::register_udfs(ctx).expect("Failed to register UDFs");
+
         Self { 
             ctx: ctx.clone(),
             s3_manager,
@@ -91,15 +95,78 @@ impl BronzeProcessor {
         self.register_source_table(&temp_table, source_path, &raw_schema).await?;
     
         // Process the data
-        let df = self.ctx.table(&temp_table).await?
-        .with_column(
-            "ingested_at",
-            lit(Utc::now().timestamp_millis())
-                .cast_to(&DataType::Timestamp(TimeUnit::Millisecond, None), 
-                self.ctx.table(&temp_table).await?.schema())?
-        )?;
+        // Apply data validations using UDFs
+        let df = self.ctx.table(&temp_table).await?;
 
-        let record_ids = self.extract_record_ids(&df).await?;
+        let original_schema = df.schema();
+        let mut select_exprs: Vec<Expr> = original_schema
+            .fields()
+            .iter()
+            .map(|f| col(f.name())) // Create col("column_name") for each field
+            .collect();
+
+        let is_valid_json = df.registry().udf("is_valid_json")?;
+        let to_timestamp = df.registry().udf("to_timestamp")?;
+
+        select_exprs.extend(vec![
+            is_valid_json.call(vec![col("details")]).alias("valid_details"),
+            is_valid_json.call(vec![col("reviews")]).alias("valid_reviews"),
+            is_valid_json.call(vec![col("ratings")]).alias("valid_ratings"),
+            // Assuming to_timestamp UDF handles casting and errors appropriately
+            to_timestamp.call(vec![col("extraction_started_at")]).alias("valid_extraction_started_at"),
+            to_timestamp.call(vec![col("extraction_completed_at")]).alias("valid_extraction_completed_at"),
+            lit(Utc::now().timestamp_millis())
+            .cast_to(&DataType::Timestamp(TimeUnit::Millisecond, None), df.schema())?
+            .alias("ingested_at"),
+        ]);
+
+        let validated_df = df.clone().select(select_exprs)?;
+
+        // Validate JSON fields are valid
+        let invalid_json_count = validated_df.clone()
+        .filter(
+            col("valid_details")
+                .and(col("valid_reviews"))
+                .and(col("valid_ratings"))
+                .not()
+        )?
+        .count()
+        .await?;
+
+        if invalid_json_count > 0 {
+            return Err(common::Error::DataValidation(
+                format!("Found {} records with invalid JSON data", invalid_json_count)
+            ));
+        }
+
+        // Validate timestamp order
+        let invalid_timestamps = validated_df.clone()
+            .filter(
+                col("valid_extraction_started_at").lt(col("valid_extraction_completed_at"))
+            )?
+            .count()
+            .await?;
+
+        if invalid_timestamps > 0 {
+            return Err(common::Error::DataValidation(
+                format!("Found {} records where completion time is before start time", invalid_timestamps)
+            ));
+        }
+
+        // Remove validation columns and create final DataFrame
+        let validated_df = validated_df.drop_columns(&[
+            "valid_details", 
+            "valid_reviews", 
+            "valid_ratings", 
+            "valid_extraction_started_at", 
+            "valid_extraction_completed_at"
+            
+            ])?;
+
+
+        println!("Validated Data");
+        
+        let record_ids = self.extract_record_ids(&validated_df).await?;
         let duplicates = DeduplicationValidator::check_record_duplicates(
             &*self.metadata_registry,
             &record_ids
@@ -115,7 +182,7 @@ impl BronzeProcessor {
         }
     
         // Create metadata
-        let df_schema = df.schema();
+        let df_schema = validated_df.schema();
         let fields: Vec<Field> = df_schema.fields()
             .iter()
             .map(|field| {
@@ -170,7 +237,7 @@ impl BronzeProcessor {
         self.ctx.deregister_table(&temp_table)?;
     
         Ok(ProcessedData {
-            df,
+            df: validated_df,
             metadata,
             parquet_options,
         })
