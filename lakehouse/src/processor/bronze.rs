@@ -112,7 +112,6 @@ impl BronzeProcessor {
             is_valid_json.call(vec![col("details")]).alias("valid_details"),
             is_valid_json.call(vec![col("reviews")]).alias("valid_reviews"),
             is_valid_json.call(vec![col("ratings")]).alias("valid_ratings"),
-            // Assuming to_timestamp UDF handles casting and errors appropriately
             to_timestamp.call(vec![col("extraction_started_at")]).alias("valid_extraction_started_at"),
             to_timestamp.call(vec![col("extraction_completed_at")]).alias("valid_extraction_completed_at"),
             lit(Utc::now().timestamp_millis())
@@ -202,7 +201,7 @@ impl BronzeProcessor {
             &arrow_schema,
             source_path,
             target_path,
-            &df,  // Pass the DataFrame
+            &validated_df,  // Pass the DataFrame
             "bronze",
             file_content,
         ).await?;

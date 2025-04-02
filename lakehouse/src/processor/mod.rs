@@ -1,18 +1,18 @@
-mod core;
-mod registration;
-mod query;
-mod storage;
-pub mod metadata;
-pub mod table;
-pub mod deduplication;
 pub mod bronze;
 pub mod config;
+mod core;
+pub mod deduplication;
+mod metadata;
+mod query;
+mod registration;
+mod storage;
+pub mod table;
 pub mod udf;
 
 // Re-export main types and traits
 pub use self::core::LakehouseProcessor;
-pub use deduplication::DeduplicationValidator;
 use crate::utils::paths::PathBuilder;
+pub use deduplication::DeduplicationValidator;
 
 // Types shared across modules
 #[derive(Debug, Clone)]
@@ -33,15 +33,14 @@ pub enum ProcessingType {
 }
 
 // Common imports used across modules
+use arrow::datatypes::Schema;
 use chrono::Utc;
 use common::Result;
-use std::sync::Arc;
-use arrow::datatypes::Schema;
 use datafusion::execution::context::SessionContext;
+use std::sync::Arc;
 
 // ProcessingRequest implementation
 impl ProcessingRequest {
-
     pub fn new_s3_direct_with_files(
         city_code: &str,
         year: i32,
