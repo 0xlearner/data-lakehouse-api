@@ -1,9 +1,9 @@
+use crate::processor::config::StorageConfig;
+use crate::processor::{LakehouseProcessor, ProcessingRequest};
 use common::Result;
 use common::config::Settings;
-use crate::processor::{LakehouseProcessor, ProcessingRequest};
-use crate::processor::config::StorageConfig;
-use std::sync::Arc;
 use serde_json::Value;
+use std::sync::Arc;
 
 pub struct LakehouseService {
     processor: Arc<LakehouseProcessor>,
@@ -22,9 +22,9 @@ impl LakehouseService {
             metadata_bucket: settings.minio.metadata_bucket.clone(),
         };
         let processor = LakehouseProcessor::new(&s3_config).await?;
-        
+
         let storage_config = StorageConfig::from_settings(settings).await?;
-        
+
         processor.register_buckets(&storage_config).await?;
 
         Ok(Self {
@@ -32,7 +32,7 @@ impl LakehouseService {
             storage_config,
         })
     }
-    
+
     async fn list_source_files(
         &self,
         city_code: &str,
@@ -40,14 +40,25 @@ impl LakehouseService {
         month: u32,
         day: u32,
     ) -> Result<Vec<String>> {
-        let files = self.processor.list_source_parquet_files(city_code, year, month, day).await?;
+        let files = self
+            .processor
+            .list_source_parquet_files(city_code, year, month, day)
+            .await?;
 
         if files.is_empty() {
-            println!("No files found for city: {}, date: {}-{:02}-{:02}", 
-                city_code, year, month, day);
+            println!(
+                "No files found for city: {}, date: {}-{:02}-{:02}",
+                city_code, year, month, day
+            );
         } else {
-            println!("Found {} files for city: {}, date: {}-{:02}-{:02}", 
-                files.len(), city_code, year, month, day);
+            println!(
+                "Found {} files for city: {}, date: {}-{:02}-{:02}",
+                files.len(),
+                city_code,
+                year,
+                month,
+                day
+            );
         }
 
         Ok(files)
@@ -81,14 +92,21 @@ impl LakehouseService {
         );
 
         // Process the data
-        let (processed_data, target_path) = self.processor.process_bronze_data(request).await?;
-
-        let bronze_key = self.processor.store_bronze_data(
-            processed_data,
-            &target_path,
-        ).await?;
-
-        Ok(bronze_key)
+        match self.processor.process_bronze_data(request).await {
+            Ok((processed_data, target_path)) => {
+                println!("Successfully processed data to bronze layer");
+                let bronze_key = self
+                    .processor
+                    .store_bronze_data(processed_data, &target_path)
+                    .await?;
+                Ok(bronze_key)
+            }
+            Err(e @ common::Error::DuplicateData(_)) => {
+                println!("Skipping duplicate data: {}", e);
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn query_bronze_data(
@@ -101,7 +119,7 @@ impl LakehouseService {
     ) -> Result<Vec<Value>> {
         // Clone the Arc<LakehouseProcessor> for use in the query
         let processor = Arc::clone(&self.processor);
-        
+
         println!(
             "Querying bronze data for city: {}, date: {}-{:02}-{:02}, limit: {}",
             city_code, year, month, day, limit

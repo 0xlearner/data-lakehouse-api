@@ -70,6 +70,7 @@ pub async fn create_dataset_metadata(
     df: &DataFrame, // Changed parameter to accept DataFrame
     layer: &str,
     file_content: Option<&[u8]>,
+    record_ids: &[String],
 ) -> Result<DatasetMetadata> {
     let schema_json = schema_to_json(schema)?;
 
@@ -89,7 +90,7 @@ pub async fn create_dataset_metadata(
     // Calculate quality metrics
     let metrics = QualityMetrics::new(df).await?;
 
-    Ok(DatasetMetadata {
+    let mut metadata = DatasetMetadata {
         dataset_id: format!("{}_{}", layer, Utc::now().format("%Y%m%d_%H%M%S")),
         layer: layer.to_string(),
         schema: SchemaMetadata {
@@ -117,5 +118,14 @@ pub async fn create_dataset_metadata(
         metrics,
         custom_metadata: HashMap::new(),
         content_hash,
-    })
+    };
+
+    if !record_ids.is_empty() {
+        let ids_string = record_ids.join(",");
+        metadata
+            .custom_metadata
+            .insert("record_ids".to_string(), ids_string);
+    }
+
+    Ok(metadata)
 }
