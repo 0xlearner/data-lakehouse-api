@@ -11,8 +11,8 @@ pub mod udf;
 
 // Re-export main types and traits
 pub use self::core::LakehouseProcessor;
+pub use crate::processor::deduplication::DeduplicationValidator;
 use crate::utils::paths::PathBuilder;
-pub use deduplication::DeduplicationValidator;
 
 // Types shared across modules
 #[derive(Debug, Clone)]

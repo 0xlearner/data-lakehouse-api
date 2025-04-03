@@ -66,6 +66,32 @@ impl QualityMetrics {
         let mut column_stats = HashMap::new();
         let mut total_nulls = 0u64;
 
+        // Calculate duplicate metrics
+        let mut unique_records = HashSet::new();
+        let mut duplicate_count = 0u64;
+
+        for batch in &batches {
+            for row_idx in 0..batch.num_rows() {
+                // Create a unique key for each row using all column values
+                let mut row_key = String::new();
+                for col_idx in 0..batch.num_columns() {
+                    let column = batch.column(col_idx);
+                    if !column.is_null(row_idx) {
+                        let value = Self::convert_array_value(column, row_idx)?;
+                        row_key.push_str(&value);
+                    }
+                }
+
+                // If the record is already seen, increment duplicate count
+                if !unique_records.insert(row_key) {
+                    duplicate_count += 1;
+                }
+            }
+        }
+
+        let unique_record_count = record_count - duplicate_count;
+
+        // ... rest of the column statistics calculation ...
         for (col_idx, field) in schema.fields().iter().enumerate() {
             let mut null_count = 0u64;
             let mut distinct_values = HashSet::new();
@@ -113,26 +139,23 @@ impl QualityMetrics {
             );
         }
 
-        // Calculate overall null percentage
         let null_percentage = if record_count > 0 {
             (total_nulls as f64) / (record_count as f64 * schema.fields().len() as f64) * 100.0
         } else {
             0.0
         };
 
-        // Calculate checksum using key metrics
+        // Calculate checksum
         let mut hasher = Sha256::new();
-
-        // Add record count to checksum
         hasher.update(record_count.to_le_bytes());
+        hasher.update(duplicate_count.to_le_bytes());
+        hasher.update(unique_record_count.to_le_bytes());
 
-        // Add schema field names and types to checksum
         for field in schema.fields() {
             hasher.update(field.name().as_bytes());
             hasher.update(format!("{:?}", field.data_type()).as_bytes());
         }
 
-        // Add column statistics to checksum
         for (col_name, stats) in &column_stats {
             hasher.update(col_name.as_bytes());
             hasher.update(stats.null_count.to_le_bytes());
@@ -155,6 +178,8 @@ impl QualityMetrics {
             checksum,
             calculated_at: Utc::now(),
             column_stats,
+            duplicate_count,
+            unique_record_count,
         })
     }
 }

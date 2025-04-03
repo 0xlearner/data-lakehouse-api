@@ -94,16 +94,27 @@ impl LakehouseService {
         // Process the data
         match self.processor.process_bronze_data(request).await {
             Ok((processed_data, target_path)) => {
+                // Check if we have any data left after deduplication
+                if processed_data.df.clone().count().await? == 0 {
+                    println!("Skipping processing - all records are duplicates");
+                    return Ok("skipped-duplicate-data".to_string());
+                }
+
                 println!("Successfully processed data to bronze layer");
                 let bronze_key = self
                     .processor
                     .store_bronze_data(processed_data, &target_path)
                     .await?;
+                println!("Stored bronze data at key: {}", bronze_key);
                 Ok(bronze_key)
             }
             Err(e @ common::Error::DuplicateData(_)) => {
                 println!("Skipping duplicate data: {}", e);
-                Err(e)
+                Ok("skipped-duplicate-data".to_string()) // Return Ok with special marker instead of an error
+            }
+            Err(e @ common::Error::StaleData(_)) => {
+                println!("Skipping stale data: {}", e);
+                Ok("skipped-stale-data".to_string()) // Return Ok with special marker instead of an error
             }
             Err(e) => Err(e),
         }

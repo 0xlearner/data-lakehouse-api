@@ -1,13 +1,13 @@
-use common::Result;
-use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::{create_udf, Volatility};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::logical_expr::ColumnarValue;
-use datafusion::arrow::array::{BooleanArray, StringArray, Int64Array, TimestampMillisecondArray};
-use datafusion::common::DataFusionError;
-use std::sync::Arc;
 use chrono::DateTime;
+use common::Result;
+use datafusion::arrow::array::{BooleanArray, Int64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::datatypes::DataType;
+use datafusion::common::DataFusionError;
+use datafusion::execution::context::SessionContext;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion::logical_expr::{Volatility, create_udf};
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Registers all UDFs with the SessionContext
 pub fn register_udfs(ctx: &SessionContext) -> Result<()> {
@@ -26,7 +26,9 @@ pub fn register_udfs(ctx: &SessionContext) -> Result<()> {
         vec![DataType::Int64],
         DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
         Volatility::Immutable,
-        Arc::new(|args| convert_to_timestamp(args).map_err(|e| DataFusionError::Internal(e.to_string()))),
+        Arc::new(|args| {
+            convert_to_timestamp(args).map_err(|e| DataFusionError::Internal(e.to_string()))
+        }),
     );
 
     // JSON extraction UDF
@@ -35,7 +37,9 @@ pub fn register_udfs(ctx: &SessionContext) -> Result<()> {
         vec![DataType::Utf8, DataType::Utf8],
         DataType::Utf8,
         Volatility::Immutable,
-        Arc::new(|args| extract_field_from_json(args).map_err(|e| DataFusionError::Internal(e.to_string()))),
+        Arc::new(|args| {
+            extract_field_from_json(args).map_err(|e| DataFusionError::Internal(e.to_string()))
+        }),
     );
 
     // JSON array length UDF
@@ -44,7 +48,9 @@ pub fn register_udfs(ctx: &SessionContext) -> Result<()> {
         vec![DataType::Utf8],
         DataType::Int64,
         Volatility::Immutable,
-        Arc::new(|args| get_json_array_length(args).map_err(|e| DataFusionError::Internal(e.to_string()))),
+        Arc::new(|args| {
+            get_json_array_length(args).map_err(|e| DataFusionError::Internal(e.to_string()))
+        }),
     );
 
     // Register all UDFs
@@ -64,15 +70,15 @@ fn validate_json(args: &[ColumnarValue]) -> Result<ColumnarValue> {
             .downcast_ref::<StringArray>()
             .ok_or_else(|| DataFusionError::Internal("Expected string array".to_string()))?,
         ColumnarValue::Scalar(_) => {
-            return Err(DataFusionError::Internal("Scalar inputs not supported".to_string()).into());
+            return Err(
+                DataFusionError::Internal("Scalar inputs not supported".to_string()).into(),
+            );
         }
     };
 
     let result: BooleanArray = str_array
         .iter()
-        .map(|opt_str| {
-            opt_str.map(|s| serde_json::from_str::<Value>(s).is_ok())
-        })
+        .map(|opt_str| opt_str.map(|s| serde_json::from_str::<Value>(s).is_ok()))
         .collect::<BooleanArray>();
 
     Ok(ColumnarValue::Array(Arc::new(result)))
@@ -86,20 +92,22 @@ fn convert_to_timestamp(args: &[ColumnarValue]) -> Result<ColumnarValue> {
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| DataFusionError::Internal("Expected int64 array".to_string()))?,
         ColumnarValue::Scalar(_) => {
-            return Err(DataFusionError::Internal("Scalar inputs not supported".to_string()).into());
+            return Err(
+                DataFusionError::Internal("Scalar inputs not supported".to_string()).into(),
+            );
         }
     };
 
     let result: TimestampMillisecondArray = int_array
-    .iter()
-    .map(|opt_ts| {
-        opt_ts.map(|ts| {
-            DateTime::from_timestamp_millis(ts)
-                .map(|dt| dt.timestamp_millis())
-                .unwrap_or(0)
+        .iter()
+        .map(|opt_ts| {
+            opt_ts.map(|ts| {
+                DateTime::from_timestamp_millis(ts)
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(0)
+            })
         })
-    })
-    .collect();
+        .collect();
 
     Ok(ColumnarValue::Array(Arc::new(result)))
 }
@@ -112,7 +120,9 @@ fn extract_field_from_json(args: &[ColumnarValue]) -> Result<ColumnarValue> {
             .downcast_ref::<StringArray>()
             .ok_or_else(|| DataFusionError::Internal("Expected string array".to_string()))?,
         ColumnarValue::Scalar(_) => {
-            return Err(DataFusionError::Internal("Scalar inputs not supported".to_string()).into());
+            return Err(
+                DataFusionError::Internal("Scalar inputs not supported".to_string()).into(),
+            );
         }
     };
 
@@ -122,30 +132,29 @@ fn extract_field_from_json(args: &[ColumnarValue]) -> Result<ColumnarValue> {
             .downcast_ref::<StringArray>()
             .ok_or_else(|| DataFusionError::Internal("Expected string array".to_string()))?,
         ColumnarValue::Scalar(_) => {
-            return Err(DataFusionError::Internal("Scalar inputs not supported".to_string()).into());
+            return Err(
+                DataFusionError::Internal("Scalar inputs not supported".to_string()).into(),
+            );
         }
     };
 
-    let result: StringArray = json_array
-        .iter()
-        .zip(path_array.iter())
-        .map(|(json_opt, path_opt)| {
-            match (json_opt, path_opt) {
-                (Some(json_str), Some(path)) => {
-                    serde_json::from_str::<Value>(json_str)
-                        .ok()
-                        .and_then(|value| {
-                            let mut current = &value;
-                            for key in path.split('.') {
-                                current = current.get(key)?;
-                            }
-                            Some(current.to_string())
-                        })
-                },
+    let result: StringArray =
+        json_array
+            .iter()
+            .zip(path_array.iter())
+            .map(|(json_opt, path_opt)| match (json_opt, path_opt) {
+                (Some(json_str), Some(path)) => serde_json::from_str::<Value>(json_str)
+                    .ok()
+                    .and_then(|value| {
+                        let mut current = &value;
+                        for key in path.split('.') {
+                            current = current.get(key)?;
+                        }
+                        Some(current.to_string())
+                    }),
                 _ => None,
-            }
-        })
-        .collect();
+            })
+            .collect();
 
     Ok(ColumnarValue::Array(Arc::new(result)))
 }
@@ -158,7 +167,9 @@ fn get_json_array_length(args: &[ColumnarValue]) -> Result<ColumnarValue> {
             .downcast_ref::<StringArray>()
             .ok_or_else(|| DataFusionError::Internal("Expected string array".to_string()))?,
         ColumnarValue::Scalar(_) => {
-            return Err(DataFusionError::Internal("Scalar inputs not supported".to_string()).into());
+            return Err(
+                DataFusionError::Internal("Scalar inputs not supported".to_string()).into(),
+            );
         }
     };
 
@@ -167,7 +178,13 @@ fn get_json_array_length(args: &[ColumnarValue]) -> Result<ColumnarValue> {
         .map(|json_opt| {
             json_opt
                 .and_then(|json_str| serde_json::from_str::<Value>(json_str).ok())
-                .and_then(|value| if value.is_array() { Some(value.as_array().unwrap().len() as i64) } else { None })
+                .and_then(|value| {
+                    if value.is_array() {
+                        Some(value.as_array().unwrap().len() as i64)
+                    } else {
+                        None
+                    }
+                })
         })
         .collect();
 
@@ -187,9 +204,9 @@ mod tests {
             None,
             Some(r#"[1,2,3]"#),
         ]);
-        
+
         let result = validate_json(&[ColumnarValue::Array(Arc::new(input))]).unwrap();
-        
+
         if let ColumnarValue::Array(array) = result {
             let bool_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
             assert_eq!(bool_array.value(0), true);
@@ -203,16 +220,15 @@ mod tests {
 
     #[test]
     fn test_convert_to_timestamp() {
-        let input = Int64Array::from(vec![
-            Some(1634567890123),
-            None,
-            Some(1634567890124),
-        ]);
-        
+        let input = Int64Array::from(vec![Some(1634567890123), None, Some(1634567890124)]);
+
         let result = convert_to_timestamp(&[ColumnarValue::Array(Arc::new(input))]).unwrap();
-        
+
         if let ColumnarValue::Array(array) = result {
-            let ts_array = array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap();
+            let ts_array = array
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
             assert_eq!(ts_array.is_null(1), true);
             assert!(ts_array.value(0) > 0);
             assert!(ts_array.value(2) > 0);
@@ -228,18 +244,19 @@ mod tests {
             Some(r#"{"user": {"name": "Jane"}}"#),
             None,
         ]);
-        
+
         let path_input = StringArray::from(vec![
             Some("user.name"),
             Some("user.name"),
             Some("user.name"),
         ]);
-        
+
         let result = extract_field_from_json(&[
             ColumnarValue::Array(Arc::new(json_input)),
             ColumnarValue::Array(Arc::new(path_input)),
-        ]).unwrap();
-        
+        ])
+        .unwrap();
+
         if let ColumnarValue::Array(array) = result {
             let str_array = array.as_any().downcast_ref::<StringArray>().unwrap();
             assert_eq!(str_array.value(0), "\"John\"");
@@ -258,9 +275,9 @@ mod tests {
             None,
             Some(r#"{"not": "array"}"#),
         ]);
-        
+
         let result = get_json_array_length(&[ColumnarValue::Array(Arc::new(input))]).unwrap();
-        
+
         if let ColumnarValue::Array(array) = result {
             let int_array = array.as_any().downcast_ref::<Int64Array>().unwrap();
             assert_eq!(int_array.value(0), 3);

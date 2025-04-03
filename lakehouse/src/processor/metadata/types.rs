@@ -1,6 +1,6 @@
 // models.rs
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -54,6 +54,8 @@ pub struct QualityMetrics {
     pub checksum: String,
     pub calculated_at: DateTime<Utc>,
     pub column_stats: HashMap<String, ColumnStats>,
+    pub duplicate_count: u64,
+    pub unique_record_count: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

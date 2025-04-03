@@ -2,7 +2,7 @@
 pub mod convert;
 mod quality;
 mod registry;
-mod types;
+pub mod types;
 
 pub use registry::*;
 pub use types::*;
