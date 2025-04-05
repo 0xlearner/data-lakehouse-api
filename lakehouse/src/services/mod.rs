@@ -1,13 +1,10 @@
 pub mod lakehouse;
 pub mod query;
 pub use lakehouse::LakehouseService;
+pub mod utils;
 
-use axum::{
-    response::IntoResponse,
-    http::StatusCode,
-    Json
-};
 use crate::api::models::ApiResponse;
+use axum::{Json, http::StatusCode, response::IntoResponse};
 
 pub struct AppError(pub common::Error);
 

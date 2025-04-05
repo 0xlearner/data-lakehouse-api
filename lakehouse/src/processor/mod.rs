@@ -22,7 +22,7 @@ pub struct ProcessingRequest {
     pub month: u32,
     pub day: u32,
     bucket: String,
-    source_files: Vec<String>,
+    pub source_files: Vec<String>,
     content: Option<Vec<u8>>,
 }
 

@@ -9,7 +9,7 @@ pub struct Settings {
     pub minio: MinioConfig,
     #[serde(default = "default_api_config")]
     pub api: ApiConfig,
-    pub date: DateConfig,
+    pub date: Option<DateConfig>,
     #[serde(default = "default_s3_endpoint")]
     pub s3_endpoint: String,
     #[serde(default = "default_s3_region")]
@@ -18,9 +18,15 @@ pub struct Settings {
     pub s3_bronze_bucket: String,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    #[serde(default = "default_pipeline_settings")] // Use default for the whole struct
+    pub pipeline: PipelineSettings,
 }
 
-
+#[derive(Debug, Deserialize, Clone)]
+pub struct PipelineSettings {
+    #[serde(default = "default_pipeline_concurrency")] // Add default if desired
+    pub concurrency: usize, // Use usize for concurrency usually
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Cities {
@@ -40,8 +46,8 @@ pub struct MinioConfig {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
-    pub source_bucket: String,  // food-panda-vendors
-    pub bronze_bucket: String,  // bronze (target)
+    pub source_bucket: String,   // food-panda-vendors
+    pub bronze_bucket: String,   // bronze (target)
     pub metadata_bucket: String, // metadata
 }
 
@@ -71,6 +77,16 @@ fn default_s3_bucket() -> String {
 
 fn default_api_port() -> u16 {
     3000
+}
+
+fn default_pipeline_concurrency() -> usize {
+    4
+}
+
+fn default_pipeline_settings() -> PipelineSettings {
+    PipelineSettings {
+        concurrency: default_pipeline_concurrency(),
+    }
 }
 
 impl Settings {

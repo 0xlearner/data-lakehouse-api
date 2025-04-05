@@ -75,7 +75,8 @@ impl S3Manager {
             .build()?;
 
         let store = Arc::new(s3);
-        self.object_store_cache.insert(bucket.to_string(), store.clone());
+        self.object_store_cache
+            .insert(bucket.to_string(), store.clone());
         Ok(store)
     }
 
@@ -93,18 +94,28 @@ impl S3Manager {
     /// Verifies that a bucket exists and is accessible
     pub async fn verify_bucket_exists(&self, bucket: &str) -> Result<()> {
         let client = self.get_client(bucket).await?;
-        
-        match client.head_bucket()
-            .bucket(bucket)
-            .send()
-            .await
-        {
+
+        match client.head_bucket().bucket(bucket).send().await {
             Ok(_) => Ok(()),
             Err(e) => Err(common::Error::Storage(format!(
                 "Cannot access bucket '{}': {}",
                 bucket, e
             ))),
         }
+    }
+
+    /// Lists all parquet files in the source bucket.
+    pub async fn list_all_source_parquet_files(&self) -> Result<Vec<String>> {
+        println!(
+            "Listing all parquet files in source bucket: {}",
+            self.config.source_bucket
+        );
+        let options = ListOptions {
+            prefix: None, // List from the root (or specify a base prefix if all relevant data is under e.g., "raw/")
+            extensions: Some(vec![".parquet".to_string()]),
+            ..Default::default()
+        };
+        self.list_files(&self.config.source_bucket, options).await
     }
 
     pub async fn list_source_files(
@@ -150,26 +161,26 @@ impl S3Manager {
     }
 
     /// Lists files in a specified bucket with filtering options
-    /// 
+    ///
     /// # Arguments
     /// * `bucket` - The bucket to list files from
     /// * `options` - Optional filtering and listing parameters
     pub async fn list_files(&self, bucket: &str, options: ListOptions) -> Result<Vec<String>> {
         let client = self.get_client(bucket).await?;
         let mut request = client.list_objects_v2().bucket(bucket);
-    
+
         if let Some(ref prefix) = options.prefix {
             request = request.prefix(prefix);
         }
-    
+
         if let Some(ref delimiter) = options.delimiter {
             request = request.delimiter(delimiter);
         }
-    
+
         if let Some(max_keys) = options.max_keys {
             request = request.max_keys(max_keys);
         }
-    
+
         let objects = request.send().await?;
         let mut files = Vec::new();
         let contents = objects.contents();
@@ -177,26 +188,26 @@ impl S3Manager {
             for object in contents {
                 if let Some(key) = object.key() {
                     let should_include = match &options.extensions {
-                        Some(extensions) => {
-                            extensions.iter().any(|ext| key.ends_with(ext))
-                        },
+                        Some(extensions) => extensions.iter().any(|ext| key.ends_with(ext)),
                         None => true,
                     };
-    
+
                     if should_include {
                         files.push(format!("s3://{}/{}", bucket, key));
                     }
                 }
             }
         }
-    
+
         if files.is_empty() {
-            println!("No files found in bucket: {} with prefix: {:?}", 
-                bucket, options.prefix);
+            println!(
+                "No files found in bucket: {} with prefix: {:?}",
+                bucket, options.prefix
+            );
         } else {
             println!("Found {} files in bucket: {}", files.len(), bucket);
         }
-    
+
         Ok(files)
     }
 }

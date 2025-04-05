@@ -7,10 +7,8 @@ log_level = "info"
 [cities]
 codes = ["69036", "107681", "200253"]
 
-[date]
-year = 2025
-month = 3
-day = 29
+[pipeline]
+concurrency = 2
 
 [minio]
 endpoint = "http://localhost:9000"
