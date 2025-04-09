@@ -2,7 +2,9 @@ use super::*;
 use crate::processor::bronze::types::ProcessedData;
 use crate::processor::config::StorageConfig;
 use crate::processor::core::LakehouseProcessor;
+use crate::processor::silver::types::ProcessedSilverData;
 use crate::storage::s3::{ObjectStorage, S3Storage};
+use std::collections::HashMap;
 
 impl LakehouseProcessor {
     pub async fn store_bronze_data(
@@ -35,6 +37,41 @@ impl LakehouseProcessor {
             .await?;
 
         Ok(clean_key.to_string()) // Return the same path for consistency
+    }
+
+    pub async fn store_silver_data(
+        &self,
+        data: ProcessedSilverData,
+        target_paths: &HashMap<String, String>,
+    ) -> Result<HashMap<String, String>> {
+        let storage: Arc<dyn ObjectStorage> = Arc::new(
+            S3Storage::new(
+                self.s3_manager.clone(),
+                &self.s3_manager.config.silver_bucket,
+            )
+            .await?,
+        );
+
+        // Store all tables at once using the silver storage manager
+        self.silver
+            .storage_manager
+            .store_silver_tables(data, &*storage, target_paths)
+            .await?;
+
+        // Return the cleaned paths
+        let stored_paths: HashMap<String, String> = target_paths
+            .iter()
+            .map(|(table_name, path)| {
+                let clean_path = path
+                    .strip_prefix("s3://")
+                    .unwrap_or(path)
+                    .trim_start_matches('/')
+                    .to_string();
+                (table_name.clone(), clean_path)
+            })
+            .collect();
+
+        Ok(stored_paths)
     }
 
     pub async fn list_source_parquet_files(
@@ -79,6 +116,7 @@ impl LakehouseProcessor {
         let buckets = [
             &config.source_bucket,
             &config.bronze_bucket,
+            &config.silver_bucket,
             &config.metadata_bucket,
         ];
 

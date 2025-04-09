@@ -47,7 +47,8 @@ pub struct MinioConfig {
     pub secret_key: String,
     pub region: String,
     pub source_bucket: String,   // food-panda-vendors
-    pub bronze_bucket: String,   // bronze (target)
+    pub bronze_bucket: String,   // bronze
+    pub silver_bucket: String,   // silver
     pub metadata_bucket: String, // metadata
 }
 

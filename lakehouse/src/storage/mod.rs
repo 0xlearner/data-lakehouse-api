@@ -16,6 +16,7 @@ pub struct S3Config {
     pub source_bucket: String,
     pub metadata_bucket: String,
     pub bronze_bucket: String,
+    pub silver_bucket: String,
 }
 
 #[derive(Clone)]

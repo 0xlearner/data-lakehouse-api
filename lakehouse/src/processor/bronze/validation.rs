@@ -84,12 +84,6 @@ impl DataValidator {
     pub async fn extract_record_ids(&self, df: &DataFrame) -> Result<Vec<String>> {
         let id_column = "code";
 
-        // Print the specific type for debugging
-        println!(
-            "Code column type: {:?}",
-            df.schema().field_with_name(None, id_column)?.data_type()
-        );
-
         // Create a SQL query to get the values as strings
         let sql_expr = format!("{} as id_string", id_column);
         let df_with_string = df.clone().select(vec![df.parse_sql_expr(&sql_expr)?])?;
@@ -99,7 +93,6 @@ impl DataValidator {
         let mut record_ids = Vec::new();
 
         for batch in batches {
-            println!("Batch schema: {:?}", batch.schema());
             let col_idx = batch.schema().index_of("id_string")?;
             let array = batch.column(col_idx);
 

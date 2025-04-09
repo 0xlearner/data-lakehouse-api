@@ -5,6 +5,8 @@ use crate::processor::bronze::BronzeProcessor;
 use crate::processor::bronze::ProcessedData;
 use crate::processor::config::StorageConfig;
 use crate::processor::metadata::{DatasetMetadata, MetadataRegistry, S3MetadataRegistry};
+use crate::processor::silver::SilverProcessor;
+use crate::processor::silver::types::ProcessedSilverData;
 use crate::processor::table::{ParquetTableRegistry, TableRegistry};
 use crate::storage::s3::S3Storage;
 use crate::storage::{S3Config, S3Manager};
@@ -17,6 +19,7 @@ pub struct LakehouseProcessor {
     pub(crate) schema_cache: RwLock<HashMap<&'static str, Arc<Schema>>>,
     pub(crate) s3_manager: Arc<S3Manager>,
     pub(crate) bronze: BronzeProcessor,
+    pub(crate) silver: SilverProcessor,
     pub(crate) metadata_registry: Arc<dyn MetadataRegistry>,
     pub(crate) table_registry: Arc<dyn TableRegistry>,
     pub(crate) schema_validator: SchemaValidator,
@@ -40,15 +43,23 @@ impl LakehouseProcessor {
 
         let table_registry = Arc::new(ParquetTableRegistry);
 
+        // Create storage for metadata
+        let metadata_storage =
+            Arc::new(S3Storage::new(s3_manager.clone(), &config.metadata_bucket).await?);
+        let bronze_storage =
+            Arc::new(S3Storage::new(s3_manager.clone(), &config.bronze_bucket).await?);
+
+        // Initialize metadata registry with both stores
         let metadata_registry = Arc::new(
             S3MetadataRegistry::new(
-                Arc::new(S3Storage::new(s3_manager.clone(), &config.metadata_bucket).await?),
-                Arc::new(S3Storage::new(s3_manager.clone(), &config.bronze_bucket).await?),
+                metadata_storage, // registry_store
+                bronze_storage,   // data_store
             )
             .await?,
         );
 
         let bronze = BronzeProcessor::new(&ctx, s3_manager.clone(), metadata_registry.clone());
+        let silver = SilverProcessor::new(&ctx, s3_manager.clone(), metadata_registry.clone());
         let schema_validator = SchemaValidator::new();
 
         Ok(Self {
@@ -56,6 +67,7 @@ impl LakehouseProcessor {
             schema_cache: RwLock::new(schema_cache),
             s3_manager,
             bronze,
+            silver,
             metadata_registry,
             table_registry,
             schema_validator,
@@ -115,6 +127,65 @@ impl LakehouseProcessor {
             .await?;
 
         Ok((processed_data, target_path))
+    }
+
+    pub async fn process_silver_data(
+        &self,
+        bronze_path: &str, // This is the ACTUAL S3 path to the source bronze data
+        city_code: &str,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> Result<(ProcessedSilverData, HashMap<String, String>)> {
+        println!(
+            "Processing Silver data from Bronze path: {} for partition: {}/{}/{:02}/{:02}",
+            bronze_path, city_code, year, month, day
+        );
+        // Note: bronze_table_name is typically only needed if you register the path
+        // with the DataFusion context for SQL queries within the transformation.
+        // If transformer.load_data() directly loads from the S3 path, you might
+        // not need to register it explicitly here. Check your load_data implementation.
+
+        // Process data using silver processor - UPDATED CALL
+        let processed_data = self
+            .silver
+            .process_to_silver(bronze_path, city_code, year, month, day)
+            .await?; // Now matches the updated signature (5 args after self)
+
+        // Generate target paths *after* processing, using the derived table names
+        let derived_table_names: Vec<String> =
+            processed_data.derived_tables.keys().cloned().collect();
+
+        // Call the helper method to generate the relative paths map
+        let target_paths =
+            self.generate_silver_target_paths(city_code, year, month, day, &derived_table_names);
+
+        // Return the processed data and the correctly formatted relative paths map
+        Ok((processed_data, target_paths))
+    }
+
+    fn generate_silver_target_paths(
+        &self, // Takes &self but doesn't currently use it
+        city_code: &str,
+        year: i32,
+        month: u32,
+        day: u32,
+        derived_table_names: &[String],
+    ) -> HashMap<String, String> {
+        // Construct the base relative partition path string ONCE.
+        // Format: "city_id=.../year=.../month=.../day=..."
+        let base_partition_path = format!(
+            "city_id={}/year={}/month={:02}/day={:02}", // Use {:02} for padding month/day
+            city_code, year, month, day
+        );
+
+        // Create the HashMap by mapping each table name to the base path.
+        let target_paths: HashMap<String, String> = derived_table_names
+            .iter()
+            .map(|table_name| (table_name.clone(), base_partition_path.clone()))
+            .collect();
+
+        target_paths
     }
 
     pub async fn deregister_table(&self, table_name: &str) -> Result<()> {

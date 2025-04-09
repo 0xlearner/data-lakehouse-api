@@ -3,8 +3,8 @@ use aws_sdk_s3::primitives::ByteStreamError;
 use aws_smithy_runtime_api::client::result::CreateUnhandledError;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_runtime_api::http::Response;
-use parquet::errors::ParquetError;
 use datafusion::error::DataFusionError;
+use parquet::errors::ParquetError;
 use thiserror::Error;
 use url::ParseError;
 
@@ -22,7 +22,7 @@ pub enum Error {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    
+
     #[error("UTF-8 conversion error: {0}")]
     Utf8(std::string::FromUtf8Error),
 
@@ -66,7 +66,7 @@ pub enum Error {
     DataFusion(#[from] DataFusionError),
 
     #[error("Invalid input: {0}")]
-    InvalidInput(String),  // Add this variant
+    InvalidInput(String), // Add this variant
 
     #[error("Schema validation error: {0}")]
     SchemaValidation(String),

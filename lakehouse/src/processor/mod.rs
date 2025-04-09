@@ -5,6 +5,7 @@ pub mod deduplication;
 mod metadata;
 mod query;
 mod registration;
+pub mod silver;
 mod storage;
 pub mod table;
 pub mod udf;
