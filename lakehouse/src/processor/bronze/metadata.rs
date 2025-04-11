@@ -4,6 +4,7 @@ use arrow::datatypes::Field;
 use chrono::Utc;
 use common::Result;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::common::DFSchema;
 use serde_json::json;
 
 pub struct MetadataHandler {
@@ -15,69 +16,69 @@ impl MetadataHandler {
         Self { metadata_registry }
     }
 
-    pub async fn create_and_store_metadata(
+    pub async fn create_bronze_metadata(
         &self,
         df: &DataFrame,
         source_path: &str,
-        target_path: &str,
+        target_path: &str, // This should be the actual target data path (e.g., s3://bronze-bucket/...)
         city_code: &str,
         year: i32,
         month: u32,
         day: u32,
         file_content: Option<&[u8]>,
-        record_ids: &[String],
-    ) -> Result<DatasetMetadata> {
-        // Convert DataFrame schema to Arrow schema
-        let df_schema = df.schema();
+        record_ids: &[String], // Assuming record_ids are handled correctly in create_dataset_metadata
+    ) -> Result<(DatasetMetadata, String)> {
+        // Return tuple: (metadata, metadata_ref)
+        // --- Schema Conversion ---
+        let df_schema: &DFSchema = df.schema();
         let fields: Vec<Field> = df_schema
-            .fields()
             .iter()
-            .map(|field| {
-                let field = field.as_ref();
-                Field::new(field.name(), field.data_type().clone(), field.is_nullable())
+            .map(|(_qualifier, field_arc)| {
+                let arrow_field: &Field = field_arc.as_ref();
+                // Clone the underlying Arrow Field directly
+                arrow_field.clone()
             })
             .collect();
         let arrow_schema = ArrowSchema::new(fields);
+        // --- End Schema Conversion ---
 
-        // Use the existing create_dataset_metadata function
+        // Create the metadata object
         let metadata = convert::create_dataset_metadata(
             &arrow_schema,
             source_path,
-            target_path,
+            target_path, // Pass the actual target data path
             df,
-            "bronze",
+            "bronze", // Layer
             file_content,
-            record_ids,
+            record_ids, // Pass record IDs if used by create_dataset_metadata
         )
         .await?;
 
-        // Store metadata and create marker
-        let timestamp = Utc::now().format("%H%M%S").to_string();
+        // Store metadata in the registry
+        let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string(); // Use a more sortable timestamp format
+
+        // This 'dataset_type' should likely be consistent, e.g., "vendors"
+        let dataset_type = "vendors"; // Or get this from config/context
 
         let metadata_ref = self
             .metadata_registry
             .store_metadata(
-                metadata.clone(),
-                "vendors",
+                metadata.clone(), // Clone metadata for storage
+                dataset_type,     // Consistent dataset type name
                 city_code,
                 year,
                 month,
                 day,
-                &timestamp,
+                &timestamp, // Unique timestamp for this metadata version
             )
             .await?;
 
-        // Create marker file
-        let dataset_id = format!(
-            "vendors_{}_{}_{:02}_{:02}_{}",
-            city_code, year, month, day, timestamp
-        );
+        // --- REMOVED marker creation ---
+        // let dataset_id = format!( ... );
+        // self.metadata_registry.create_marker(...) // REMOVED
 
-        self.metadata_registry
-            .create_marker(&dataset_id, &metadata_ref, &metadata.schema.version)
-            .await?;
-
-        Ok(metadata)
+        // Return the created metadata and its reference key
+        Ok((metadata, metadata_ref))
     }
 
     /// Update deduplication metrics in custom metadata

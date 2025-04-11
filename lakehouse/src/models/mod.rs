@@ -1,2 +1,2 @@
 pub mod schema;
-pub use schema::{VendorSchemaVersion, SchemaValidator, get_vendor_schema};
+pub use schema::{SchemaManager, VendorSchemaVersion, get_vendor_schema};

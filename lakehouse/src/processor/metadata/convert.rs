@@ -90,6 +90,8 @@ pub async fn create_dataset_metadata(
     // Calculate quality metrics
     let metrics = QualityMetrics::new(df).await?;
 
+    let job_id = format!("{}_processor_{}", layer, Utc::now().format("%Y%m%d_%H%M%S"));
+
     let mut metadata = DatasetMetadata {
         dataset_id: format!("{}_{}", layer, Utc::now().format("%Y%m%d_%H%M%S")),
         layer: layer.to_string(),
@@ -107,7 +109,7 @@ pub async fn create_dataset_metadata(
         },
         processing: ProcessingMetadata {
             timestamp: Utc::now(),
-            job_id: format!("bronze_processor_{}", Utc::now().format("%Y%m%d_%H%M%S")),
+            job_id,
             duration_secs: 0.0,
         },
         governance: GovernanceMetadata {

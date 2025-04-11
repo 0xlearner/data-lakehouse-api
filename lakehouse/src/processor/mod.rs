@@ -1,8 +1,8 @@
 pub mod bronze;
 pub mod config;
-mod core;
+pub mod core;
 pub mod deduplication;
-mod metadata;
+pub mod metadata;
 mod query;
 mod registration;
 pub mod silver;
@@ -34,7 +34,6 @@ pub enum ProcessingType {
 }
 
 // Common imports used across modules
-use arrow::datatypes::Schema;
 use chrono::Utc;
 use common::Result;
 use datafusion::execution::context::SessionContext;

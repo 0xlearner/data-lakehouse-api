@@ -30,23 +30,24 @@ async fn main() -> Result<()> {
         Ok(results) => {
             // Log the results of the bulk processing
             println!("Finished bulk processing.");
-            println!("  Successfully processed: {}", results.success);
+            println!("  Successfully processed to Silver: {}", results.success_silver);
             println!("  Skipped (Known Conditions): {}", results.skipped_known);
             println!(
                 "  Skipped (Path Parse Error): {}",
                 results.skipped_parse_error
             );
-            println!("  Failed: {}", results.failed);
+            println!("  Failed in Bronze: {}", results.failed_bronze);
+            println!("  Failed in Silver: {}", results.failed_silver);
 
             // Optionally log details of failed files
             if !results.failed_files.is_empty() {
                 eprintln!("Details of failed files:");
-                for (file, err) in results.failed_files {
-                    eprintln!("    - File: {}, Error: {}", file, err);
+                for (file, stage, error) in results.failed_files {
+                    eprintln!("    - File: {}, Stage: {}, Error: {}", file, stage, error);
                 }
-                // You might want to decide if a certain number of failures is critical
+                // TODO: decide if a certain number of failures is critical
                 // For example:
-                // if results.failed > 10 { // Some threshold
+                // if results.failed_bronze + results.failed_silver > 10 { // Some threshold
                 //    return Err(common::Error::PipelineFailed("Too many files failed during bulk processing".into()));
                 // }
             }

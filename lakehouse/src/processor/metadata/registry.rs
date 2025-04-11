@@ -20,14 +20,6 @@ pub trait MetadataRegistry: Send + Sync {
         day: u32,
         timestamp: &str,
     ) -> Result<String>;
-
-    async fn create_marker(
-        &self,
-        dataset_id: &str,
-        metadata_ref: &str,
-        schema_version: &str,
-    ) -> Result<String>;
-
     async fn get_metadata(&self, metadata_ref: &str) -> Result<DatasetMetadata>;
     async fn find_metadata(&self, dataset_id: &str) -> Result<DatasetMetadata>;
     async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
@@ -36,7 +28,7 @@ pub trait MetadataRegistry: Send + Sync {
     async fn find_metadata_by_source_path(&self, path: &str) -> Result<Vec<DatasetMetadata>>;
     async fn find_metadata_by_content_hash(&self, hash: &str) -> Result<Vec<DatasetMetadata>>;
     async fn find_metadata_by_record_id(&self, record_id: &str) -> Result<Vec<DatasetMetadata>>;
-    async fn find_metadata_by_source(&self, source_path: &str) -> Result<Vec<DatasetMetadata>>;
+    async fn find_metadata_by_source(&self, source_system: &str) -> Result<Vec<DatasetMetadata>>; // Renamed param for clarity
     async fn find_metadata_by_city_date(
         &self,
         dataset_type: &str,
@@ -48,7 +40,8 @@ pub trait MetadataRegistry: Send + Sync {
 
 pub struct S3MetadataRegistry {
     registry_store: Arc<dyn ObjectStorage>,
-    data_store: Arc<dyn ObjectStorage>,
+    // bronze_data_store: Arc<dyn ObjectStorage>, // Removed unused field
+    // silver_data_store: Arc<dyn ObjectStorage>, // Removed unused field
     source_path_index: Arc<DashMap<String, Vec<String>>>,
     content_hash_index: Arc<DashMap<String, Vec<String>>>,
     record_id_index: Arc<DashMap<String, Vec<String>>>,
@@ -58,52 +51,60 @@ pub struct S3MetadataRegistry {
 impl S3MetadataRegistry {
     pub async fn new(
         registry_store: Arc<dyn ObjectStorage>,
-        data_store: Arc<dyn ObjectStorage>,
     ) -> Result<Self> {
         let registry = Self {
             registry_store,
-            data_store,
             source_path_index: Arc::new(DashMap::new()),
             content_hash_index: Arc::new(DashMap::new()),
             record_id_index: Arc::new(DashMap::new()),
             source_system_index: Arc::new(DashMap::new()),
         };
-
         registry.build_index().await?;
         Ok(registry)
     }
 
     async fn build_index(&self) -> Result<()> {
         let keys = self.registry_store.list_objects("datasets/").await?;
+        for key /* type: String */ in keys {
+            match self.get_metadata(&key).await { // Pass &String which derefs to &str
+                Ok(metadata) => {
+                    // Index by source path, content hash, source system (all String)
+                    self.source_path_index
+                        .entry(metadata.lineage.source_path.clone())
+                        .or_default()
+                        .push(key.clone()); // key is String, clone is String
 
-        for key in keys {
-            if let Ok(metadata) = self.get_metadata(&key).await {
-                // Index by source path
-                self.source_path_index
-                    .entry(metadata.lineage.source_path.clone())
-                    .or_default()
-                    .push(key.clone());
+                    self.content_hash_index
+                        .entry(metadata.content_hash.clone())
+                        .or_default()
+                        .push(key.clone());
 
-                // Index by content hash
-                self.content_hash_index
-                    .entry(metadata.content_hash.clone())
-                    .or_default()
-                    .push(key.clone());
+                    self.source_system_index
+                        .entry(metadata.lineage.source_system.clone())
+                        .or_default()
+                        .push(key.clone());
 
-                // Index by source system
-                self.source_system_index
-                    .entry(metadata.lineage.source_system.clone())
-                    .or_default()
-                    .push(key.clone());
-
-                // Index by record IDs (if present)
-                if let Some(ids) = metadata.custom_metadata.get("record_ids") {
-                    for id in ids.split(',') {
-                        self.record_id_index
-                            .entry(id.trim().to_string())
-                            .or_default()
-                            .push(key.clone());
+                    // Index by record IDs (custom metadata)
+                    // --- REFINED HANDLING ---
+                    if let Some(ids_value /* type: &String */) = metadata.custom_metadata.get("record_ids") {
+                        // Directly split the &String (derefs to &str)
+                        for id /* type: &str */ in ids_value.split(',') {
+                            let trimmed_id = id.trim();
+                            if !trimmed_id.is_empty() {
+                                self.record_id_index
+                                    .entry(trimmed_id.to_string()) // Convert &str -> String for map key
+                                    .or_default()
+                                    .push(key.clone()); // key is String, push String
+                            }
+                        }
                     }
+                    // --- END REFINEMENT ---
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to load metadata for key '{}' during index build: {}",
+                        key, e
+                    );
                 }
             }
         }
@@ -129,19 +130,27 @@ impl S3MetadataRegistry {
     async fn find_metadata_by_index<'a>(
         &self,
         index: &DashMap<String, Vec<String>>,
-        key: &str,
+        key: &str, // Lookup key is &str
         validator: Option<Box<dyn Fn(&DatasetMetadata) -> bool + Send + Sync>>,
     ) -> Result<Vec<DatasetMetadata>> {
         let mut results = Vec::new();
-        if let Some(keys) = index.get(key) {
-            for key in keys.value() {
-                if let Ok(metadata) = self.get_metadata(key).await {
-                    if let Some(ref validate) = validator {
-                        if validate(&metadata) {
+        if let Some(keys_ref) = index.get(key) {
+            for key_ref /* type: &String */ in keys_ref.value() {
+                match self.get_metadata(key_ref).await { // key_ref (&String) -> &str
+                    Ok(metadata) => {
+                        if let Some(ref validate) = validator {
+                            if validate(&metadata) {
+                                results.push(metadata);
+                            }
+                        } else {
                             results.push(metadata);
                         }
-                    } else {
-                        results.push(metadata);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to get metadata for key '{}' during index lookup: {}",
+                            key_ref, e
+                        );
                     }
                 }
             }
@@ -152,9 +161,8 @@ impl S3MetadataRegistry {
 
 #[async_trait]
 impl MetadataRegistry for S3MetadataRegistry {
-    // Simplified implementations using the generic helper
+    // --- find_metadata_by_* methods are likely correct assuming String fields ---
     async fn find_metadata_by_source_path(&self, path: &str) -> Result<Vec<DatasetMetadata>> {
-        // Clone the path string to make it owned and therefore 'static
         let path_owned = path.to_string();
         self.find_metadata_by_index(
             &self.source_path_index,
@@ -167,19 +175,34 @@ impl MetadataRegistry for S3MetadataRegistry {
     }
 
     async fn find_metadata_by_content_hash(&self, hash: &str) -> Result<Vec<DatasetMetadata>> {
-        self.find_metadata_by_index(&self.content_hash_index, hash, None)
-            .await
+        let hash_owned = hash.to_string();
+        self.find_metadata_by_index(
+            &self.content_hash_index,
+            hash,
+            Some(Box::new(move |metadata| {
+                metadata.content_hash == hash_owned
+            })),
+        )
+        .await
     }
 
     async fn find_metadata_by_record_id(&self, record_id: &str) -> Result<Vec<DatasetMetadata>> {
-        self.find_metadata_by_index(&self.record_id_index, record_id, None)
+        self.find_metadata_by_index(&self.record_id_index, record_id, None) // No validator needed for direct key lookup
             .await
     }
 
-    async fn find_metadata_by_source(&self, source: &str) -> Result<Vec<DatasetMetadata>> {
-        self.find_metadata_by_index(&self.source_system_index, source, None)
-            .await
+    async fn find_metadata_by_source(&self, source_system: &str) -> Result<Vec<DatasetMetadata>> {
+        let source_owned = source_system.to_string();
+        self.find_metadata_by_index(
+            &self.source_system_index,
+            source_system,
+            Some(Box::new(move |metadata| {
+                metadata.lineage.source_system == source_owned
+            })),
+        )
+        .await
     }
+    // --- END ---
 
     async fn store_metadata(
         &self,
@@ -201,67 +224,48 @@ impl MetadataRegistry for S3MetadataRegistry {
             timestamp,
         );
 
-        // Store the metadata
         let metadata_json = serde_json::to_vec(&metadata)?;
         self.registry_store.put_object(&key, &metadata_json).await?;
 
-        // Update indexes
         self.update_indexes(&key, &metadata).await?;
 
         Ok(key)
     }
 
     async fn update_indexes(&self, key: &str, metadata: &DatasetMetadata) -> Result<()> {
-        // Update source path index
+        // Update required String field indexes
         self.source_path_index
             .entry(metadata.lineage.source_path.clone())
             .or_default()
-            .push(key.to_string());
+            .push(key.to_string()); // key is &str, convert -> String
 
-        // Update content hash index
         self.content_hash_index
             .entry(metadata.content_hash.clone())
             .or_default()
             .push(key.to_string());
 
-        // Update source system index
         self.source_system_index
             .entry(metadata.lineage.source_system.clone())
             .or_default()
             .push(key.to_string());
 
-        // Update record ID index if present
-        if let Some(ids) = metadata.custom_metadata.get("record_ids") {
-            for id in ids.split(',') {
-                self.record_id_index
-                    .entry(id.trim().to_string())
-                    .or_default()
-                    .push(key.to_string());
+        // Update record ID index (custom metadata)
+        // --- REFINED HANDLING ---
+        if let Some(ids_value /* type: &String */) = metadata.custom_metadata.get("record_ids") {
+            // Directly split the &String (derefs to &str)
+            for id /* type: &str */ in ids_value.split(',') {
+                let trimmed_id = id.trim();
+                if !trimmed_id.is_empty() {
+                    self.record_id_index
+                        .entry(trimmed_id.to_string()) // Convert &str -> String for map key
+                        .or_default()
+                        .push(key.to_string()); // key is &str, convert -> String
+                }
             }
         }
+        // --- END REFINEMENT ---
 
         Ok(())
-    }
-
-    async fn create_marker(
-        &self,
-        dataset_id: &str,
-        metadata_ref: &str,
-        schema_version: &str,
-    ) -> Result<String> {
-        let marker = MetadataMarker {
-            dataset_id: dataset_id.to_string(),
-            metadata_ref: metadata_ref.to_string(),
-            created_at: Utc::now(),
-            schema_version: schema_version.to_string(),
-        };
-
-        let key = format!(".metadata/{}.json", dataset_id);
-        let marker_json = serde_json::to_vec(&marker)?;
-
-        self.data_store.put_object(&key, &marker_json).await?;
-
-        Ok(key)
     }
 
     async fn get_metadata(&self, metadata_ref: &str) -> Result<DatasetMetadata> {
@@ -270,25 +274,35 @@ impl MetadataRegistry for S3MetadataRegistry {
     }
 
     async fn find_metadata(&self, dataset_id: &str) -> Result<DatasetMetadata> {
-        // First check for a marker in the data bucket
-        let marker_key = format!(".metadata/{}.json", dataset_id);
-        if let Ok(marker_content) = self.data_store.get_object(&marker_key).await {
-            let marker: MetadataMarker = serde_json::from_slice(&marker_content)?;
-            return self.get_metadata(&marker.metadata_ref).await;
-        }
-
-        // Fallback to searching the registry
         let prefix = "datasets/";
         let keys = self.registry_store.list_objects(prefix).await?;
 
         for key in keys {
-            if key.contains(dataset_id) {
-                return self.get_metadata(&key).await;
+            if key.contains(&format!("{}.json", dataset_id))
+                || key.contains(&format!("{}_", dataset_id))
+            {
+                match self.get_metadata(&key).await {
+                    Ok(metadata) => {
+                        if metadata.dataset_id == dataset_id {
+                            return Ok(metadata);
+                        }
+                        eprintln!(
+                            "Warning: Filename match for key '{}', but dataset_id field ('{}') does not match target ('{}').",
+                            key, metadata.dataset_id, dataset_id
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to get metadata for potential match key '{}': {}",
+                            key, e
+                        );
+                    }
+                }
             }
         }
 
-        Err(common::Error::Other(format!(
-            "Metadata for dataset {} not found",
+        Err(common::Error::NotFound(format!(
+            "Metadata for dataset {} not found in registry",
             dataset_id
         )))
     }
@@ -306,44 +320,57 @@ impl MetadataRegistry for S3MetadataRegistry {
     ) -> Result<Vec<DatasetMetadata>> {
         let mut results = Vec::new();
         let mut current_date = start_date.date_naive();
-        let end_date = end_date.date_naive();
+        let end_date_naive = end_date.date_naive();
 
-        while current_date <= end_date {
-            let prefix = format!(
-                "datasets/bronze/{}_{}_{}_{:02}_{:02}",
-                dataset_type,
-                city_code,
-                current_date.year(),
-                current_date.month(),
-                current_date.day()
-            );
-
-            let keys = self.registry_store.list_objects(&prefix).await?;
-            for key in keys {
-                match self.get_metadata(&key).await {
-                    Ok(metadata) => results.push(metadata),
-                    Err(e) => println!("Failed to load metadata from {}: {}", key, e),
+        while current_date <= end_date_naive {
+            for layer in ["bronze", "silver"] {
+                let prefix = format!(
+                    "datasets/{}/{}_{}_{}_{:02}_{:02}",
+                    layer,
+                    dataset_type,
+                    city_code,
+                    current_date.year(),
+                    current_date.month(),
+                    current_date.day()
+                );
+                match self.registry_store.list_objects(&prefix).await {
+                    Ok(keys) => {
+                        for key in keys {
+                            match self.get_metadata(&key).await {
+                                Ok(metadata) => results.push(metadata),
+                                Err(e) => eprintln!(
+                                    "Warning: Failed to load metadata from {}: {}",
+                                    key, e
+                                ),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to list objects with prefix '{}': {}",
+                            prefix, e
+                        );
+                    }
                 }
             }
 
-            current_date = current_date.succ_opt().unwrap();
+            match current_date.succ_opt() {
+                Some(next_date) => current_date = next_date,
+                None => break,
+            }
         }
-
         Ok(results)
     }
 
     async fn list_metadata(&self, prefix: &str) -> Result<Vec<DatasetMetadata>> {
-        // Default implementation that uses list_objects + get_metadata
         let keys = self.list_objects(prefix).await?;
         let mut results = Vec::new();
-
         for key in keys {
             match self.get_metadata(&key).await {
                 Ok(metadata) => results.push(metadata),
-                Err(e) => println!("Failed to load metadata from {}: {}", key, e),
+                Err(e) => eprintln!("Warning: Failed to load metadata from {}: {}", key, e),
             }
         }
-
         Ok(results)
     }
 }

@@ -1,6 +1,6 @@
-use crate::processor::silver::types::ProcessedSilverData;
-use crate::storage::S3Manager;
+use super::*;
 use crate::storage::s3::ObjectStorage;
+use crate::processor::metadata::convert;
 use chrono::Utc;
 use common::{Error, Result};
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -9,118 +9,179 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use std::path::Path;
+use url::Url;
 
-pub struct StorageManager {}
+pub struct StorageManager {
+    storage: Arc<dyn ObjectStorage>,
+}
 
 impl StorageManager {
-    pub fn new(_s3_manager: Arc<S3Manager>) -> Self {
-        Self {}
+    pub fn new(storage: Arc<dyn ObjectStorage>) -> Self {
+        Self { storage }
     }
-
     pub async fn store_silver_tables(
         &self,
-        processed_data: ProcessedSilverData,
-        storage: &dyn ObjectStorage,
-        target_paths: &HashMap<String, String>, // Still contains RELATIVE directory paths
+        derived_tables: HashMap<String, DataFrame>,
+        target_paths: &HashMap<String, String>,
+        schema_manager: &SchemaManager,  // Add SchemaManager parameter
     ) -> Result<()> {
-        let bucket_name = storage.bucket();
+        let bucket_name = self.storage.bucket();
         let base_s3_uri = format!("s3://{}/", bucket_name);
 
-        for (table_name, df) in processed_data.derived_tables {
-            // 1. Get the base relative PARTITION path (directory) from the map
+        // Create metadata map for all tables first
+        let mut metadata_map = HashMap::new();
+        for (table_name, df) in &derived_tables {
+            let target_path = target_paths.get(table_name).ok_or_else(|| {
+                Error::Storage(format!("No target path found for table {}", table_name))
+            })?;
+
+            // Create metadata for each table
+            let metadata = convert::create_dataset_metadata(
+                &schema_manager.get_schema(df)?,
+                "", // source path will be added later
+                target_path,
+                df,
+                "silver",
+                None,
+                &[],
+            ).await?;
+
+            metadata_map.insert(table_name.clone(), metadata);
+        }
+
+        // Get parquet options for all tables at once
+        let parquet_options_map = schema_manager.create_parquet_options_for_tables(&metadata_map);
+
+        // Process each table with its corresponding options
+        for (table_name, df) in derived_tables {
+            let df_repartitioned = df.repartition(Partitioning::RoundRobinBatch(1))?;
+
+            self.validate_schema(&df_repartitioned, &table_name).await?;
+            
+            // Get the specific options for this table
+            let parquet_options = parquet_options_map.get(&table_name).ok_or_else(|| {
+                Error::Storage(format!(
+                    "No parquet options found for table '{}'",
+                    table_name
+                ))
+            })?;
+
+            // Construct the target path
             let relative_partition_path = target_paths.get(&table_name).ok_or_else(|| {
                 Error::Storage(format!("No target path found for table {}", table_name))
             })?;
-            let cleaned_relative_partition_path = relative_partition_path.trim_matches('/');
 
-            // 2. Construct the relative DIRECTORY key prefix within the bucket
-            let final_relative_dir_key = if cleaned_relative_partition_path.is_empty() {
-                format!("table={}", table_name)
-            } else {
-                format!("table={}/{}", table_name, cleaned_relative_partition_path)
-            };
-            let final_relative_dir_key = final_relative_dir_key.trim_matches('/');
-
-            // 3. Generate the desired FILENAME part
-            let timestamp = Utc::now().format("%Y%m%d%H%M%S"); // Use a consistent timestamp format
-            let filename = format!("{}_{}.parquet", table_name, timestamp);
-
-            // 4. Construct the FULL S3 URI including the desired FILENAME
-            let target_s3_uri_with_filename = format!(
-                "{}/{}/{}", // s3://<bucket>/<relative_dir_key>/<filename>
+            let target_s3_uri = format!(
+                "{}/{}/{}_{}.parquet",
                 base_s3_uri.trim_end_matches('/'),
-                final_relative_dir_key,
-                filename
-            );
-
-            // --- NEW: Repartition the DataFrame to 1 partition ---
-            // This forces a single output file but impacts write parallelism.
-            println!(
-                "Repartitioning DataFrame for table '{}' to 1 partition before writing...",
-                table_name
-            );
-            let df_repartitioned =
-                df.repartition(Partitioning::RoundRobinBatch(1))
-                    .map_err(|e| {
-                        Error::Other(format!(
-                            "Failed to repartition DataFrame for table '{}': {}",
-                            table_name, e
-                        ))
-                    })?;
-            // --- End Repartition ---
-
-            // Validate schema (on the repartitioned DF, schema should be the same)
-            self.validate_schema(&df_repartitioned, &table_name).await?;
-
-            // Get parquet options
-            let parquet_options =
-                processed_data
-                    .parquet_options
-                    .get(&table_name)
-                    .ok_or_else(|| {
-                        Error::Storage(format!("No parquet options found for table {}", table_name))
-                    })?;
-
-            println!(
-                "Attempting to write single silver file for table '{}' to S3 URI: {}",
+                relative_partition_path.trim_matches('/'),
                 table_name,
-                target_s3_uri_with_filename // Log the FULL path including filename
+                Utc::now().format("%Y%m%d%H%M%S")
             );
 
-            // 5. Write data using the *full S3 URI with filename* and the *repartitioned DF*
-            df_repartitioned // Use the repartitioned DataFrame
+            println!(
+                "Writing silver table '{}' to: {}",
+                table_name,
+                target_s3_uri
+            );
+
+            // Write the data with table-specific options
+            df_repartitioned
                 .write_parquet(
-                    &target_s3_uri_with_filename, // Use the full path with filename
-                    DataFrameWriteOptions::new(), // Options usually don't affect filename directly
+                    &target_s3_uri,
+                    DataFrameWriteOptions::new(),
                     Some(parquet_options.clone()),
                 )
-                .await
-                .map_err(|e| {
-                    Error::Storage(format!(
-                        "Failed to write single parquet file for table '{}' to {}: {}",
-                        table_name, target_s3_uri_with_filename, e
-                    ))
-                })?;
-
-            // 6. Construct the relative KEY for verification (including filename)
-            let final_relative_file_key = format!("{}/{}", final_relative_dir_key, filename);
-
-            // 7. Verify using the *exact relative file key*
-            println!(
-                "Attempting verification with exact relative file key: {}",
-                final_relative_file_key
-            );
-            // If keeping verification, modify it to check for the exact file
-            self.verify_exact_file_exists(storage, &final_relative_file_key)
                 .await?;
 
-            println!(
-                "Successfully wrote and verified single silver file for table '{}' to S3 URI: {}",
-                table_name, target_s3_uri_with_filename
-            );
-        } // End loop
+        // Extract the exact file key from the S3 URI for verification
+        let exact_key = self.object_key_from_s3_path(&target_s3_uri)?;
+        
+        // Verify the file exists after writing
+        println!("Verifying file was written successfully...");
+        self.verify_exact_file_exists(&*self.storage, &exact_key).await?;
+        println!("File verification successful for table {}", table_name);
+        }
 
         Ok(())
+    }
+
+    pub async fn write_marker(
+        &self,
+        target_path: &str,
+        metadata: &DatasetMetadata,
+        metadata_ref: String,
+        table_name: &str,
+    ) -> Result<()> {
+        let marker = MetadataMarker {
+            dataset_id: metadata.dataset_id.clone(),
+            metadata_ref,
+            created_at: Utc::now(),
+            schema_version: metadata.schema.version.clone(),
+            table_name: Some(table_name.to_string()),
+        };
+        let marker_json = serde_json::to_vec_pretty(&marker)?;
+    
+        // Ensure target_path has s3:// prefix
+        let full_s3_path = if target_path.starts_with("s3://") {
+            target_path.to_string()
+        } else {
+            format!("s3://{}/{}", self.storage.bucket(), target_path)
+        };
+    
+        let object_key = self.object_key_from_s3_path(&full_s3_path)?;
+        let target_dir = Path::new(&object_key)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "".to_string());
+
+        let marker_key = if target_dir.is_empty() {
+            format!("table={}/{}", table_name, "_SUCCESS")
+        } else {
+            format!("table={}/{}/{}", table_name, target_dir, "_SUCCESS")
+        };
+
+        println!("Silver: Writing marker to key: {}", marker_key);
+        self.storage.put_object(&marker_key, &marker_json).await?;
+        println!("Silver: Marker file written successfully for table {}", table_name);
+
+        Ok(())
+    }
+
+    fn object_key_from_s3_path(&self, s3_path: &str) -> Result<String> {
+        // Add validation for s3:// prefix
+        if !s3_path.starts_with("s3://") {
+            return Err(Error::InvalidInput(format!(
+                "Path '{}' must start with 's3://'",
+                s3_path
+            )));
+        }
+    
+        let parsed_url = Url::parse(s3_path).map_err(|e| {
+            Error::InvalidInput(format!(
+                "Failed to parse S3 path '{}': {}",
+                s3_path, e
+            ))
+        })?;
+    
+        if parsed_url.scheme() != "s3" {
+            return Err(Error::InvalidInput(format!(
+                "Path '{}' is not an S3 path (expected scheme 's3')",
+                s3_path
+            )));
+        }
+    
+        let key = parsed_url.path().trim_start_matches('/').to_string();
+    
+        if key.is_empty() {
+            return Err(Error::InvalidInput(format!(
+                "S3 path '{}' results in an empty object key",
+                s3_path
+            )));
+        }
+    
+        Ok(key)
     }
 
     // Renamed and modified verification to check for an EXACT file key

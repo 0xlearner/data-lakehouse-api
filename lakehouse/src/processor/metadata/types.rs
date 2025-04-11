@@ -72,4 +72,5 @@ pub struct MetadataMarker {
     pub metadata_ref: String,
     pub created_at: DateTime<Utc>,
     pub schema_version: String,
+    pub table_name: Option<String>,
 }

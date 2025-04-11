@@ -7,7 +7,6 @@ use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::DFSchema;
 use datafusion::dataframe::DataFrame;
 use serde_json::json;
-use std::collections::HashMap;
 
 pub struct MetadataHandler {
     metadata_registry: Arc<dyn MetadataRegistry>,
@@ -18,101 +17,82 @@ impl MetadataHandler {
         Self { metadata_registry }
     }
 
-    pub async fn create_metadata_for_tables(
+    // Combined function to create and store metadata for a single silver table
+    pub async fn create_silver_metadata(
         &self,
-        derived_tables: &HashMap<String, DataFrame>,
-        source_path: &str,
+        df: &DataFrame,
+        source_path: &str,      // Source Bronze path
+        target_s3_path: &str, // Full target Silver S3 path for this specific file
+        table_name: &str,       // Name of the derived silver table
         city_code: &str,
         year: i32,
         month: u32,
         day: u32,
-    ) -> Result<HashMap<String, DatasetMetadata>> {
-        let mut metadata_map = HashMap::new();
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        timestamp: &str, // Timestamp for the batch
+    ) -> Result<(DatasetMetadata, String)> { // Returns (metadata, metadata_ref)
+        // --- Schema Conversion (Similar to before) ---
+         let df_schema: &DFSchema = df.schema();
+         let fields: Vec<Field> = df_schema
+             .iter()
+             .map(|(_qualifier, field_arc)| {
+                 let arrow_field: &Field = field_arc.as_ref();
+                 arrow_field.clone()
+             })
+             .collect();
+         let arrow_schema = ArrowSchema::new(fields);
+        // --- End Schema Conversion ---
 
-        for (table_name, df) in derived_tables {
-            let relative_target_prefix = format!(
-                "table={}/city_id={}/year={}/month={:02}/day={:02}",
-                table_name, city_code, year, month, day
-            );
+        // Create base metadata object using the common converter
+        let mut metadata = convert::create_dataset_metadata(
+            &arrow_schema,
+            source_path,
+            target_s3_path, // Use the specific target file path
+            df,
+            "silver", // Layer
+            None,     // No raw content
+            &[],      // No specific record IDs
+        )
+        .await?;
 
-            // --- CORRECTED SCHEMA CONVERSION AGAIN ---
-            let df_schema: &DFSchema = df.schema();
+        // Add Silver-specific transformation metadata
+        self.add_transformation_metadata(&mut metadata, table_name, source_path);
 
-            // Iterate over the schema. The iterator yields tuples: (qualifier, &Arc<Field>)
-            let fields: Vec<Field> = df_schema
-                .iter()
-                .map(|(_qualifier, field_arc)| {
-                    // Destructure the tuple, ignore qualifier if not needed
-                    // field_arc is &Arc<Field>. Deref to get &Field.
-                    let arrow_field: &Field = field_arc.as_ref(); // or simply &**field_arc
-
-                    // Create a *new* Arrow Field. We need to clone properties.
-                    // Note: Using arrow_field.clone() might be simpler if no modifications needed.
-                    Field::new(
-                        arrow_field.name(),              // Get name (&str) from Arrow Field
-                        arrow_field.data_type().clone(), // Get data type (&ArrowDataType) and clone
-                        arrow_field.is_nullable(),       // Get nullability (bool)
-                    )
-                    // Simpler alternative if no changes needed:
-                    // field_arc.as_ref().clone()
-                })
-                .collect();
-            let arrow_schema = ArrowSchema::new(fields);
-            // --- END CORRECTION ---
-
-            let metadata = convert::create_dataset_metadata(
-                &arrow_schema,
-                source_path,
-                &relative_target_prefix,
-                df,
-                "silver",
-                None,
-                &[],
+        // Store the enhanced metadata in the registry
+        let metadata_ref = self
+            .metadata_registry
+            .store_metadata(
+                metadata.clone(), // Clone metadata for storage
+                table_name,       // Dataset type is the table name
+                city_code,
+                year,
+                month,
+                day,
+                timestamp, // Use the provided timestamp
             )
             .await?;
 
-            let metadata_ref = self
-                .metadata_registry
-                .store_metadata(
-                    metadata.clone(),
-                    table_name,
-                    city_code,
-                    year,
-                    month,
-                    day,
-                    &timestamp,
-                )
-                .await?;
-
-            let dataset_id = format!(
-                "{}_{}_{}_{:02}_{:02}_{}",
-                table_name, city_code, year, month, day, timestamp
-            );
-
-            self.metadata_registry
-                .create_marker(&dataset_id, &metadata_ref, &metadata.schema.version)
-                .await?;
-
-            let mut enhanced_metadata = metadata.clone();
-            self.add_transformation_metadata(&mut enhanced_metadata, table_name);
-
-            metadata_map.insert(table_name.clone(), enhanced_metadata);
-        }
-
-        Ok(metadata_map)
+        // Return the final metadata object and its reference key
+        Ok((metadata, metadata_ref))
     }
 
-    fn add_transformation_metadata(&self, metadata: &mut DatasetMetadata, table_name: &str) {
+    // Helper function remains the same
+    fn add_transformation_metadata(
+        &self,
+        metadata: &mut DatasetMetadata,
+        table_name: &str,
+        source_bronze_path: &str,
+    ) {
         let transformation_details = json!({
             "table_type": table_name,
-            "derived_from": "bronze_vendors",
-            "transformation_type": "silver_transformation",
+            "derived_from": source_bronze_path, // Include source path
+            "transformation_type": "silver_transformation", // Or more specific name
             "processed_at": Utc::now().to_rfc3339(),
         });
         metadata.custom_metadata.insert(
             "lakehouse_transformation".to_string(),
             transformation_details.to_string(),
         );
+        // Also update lineage if appropriate
+        metadata.lineage.transformation = "silver_transformation".to_string(); // Example
     }
 }

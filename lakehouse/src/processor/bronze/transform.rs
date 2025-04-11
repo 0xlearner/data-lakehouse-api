@@ -4,13 +4,14 @@ use chrono::Utc;
 use common::Result;
 use datafusion::logical_expr::ExprSchemable;
 use datafusion::prelude::*;
+use std::sync::Arc; // Added Arc import
 
 pub struct DataTransformer {
-    ctx: SessionContext,
+    ctx: Arc<SessionContext>, // Changed to Arc<SessionContext>
 }
 
 impl DataTransformer {
-    pub fn new(ctx: SessionContext) -> Self {
+    pub fn new(ctx: Arc<SessionContext>) -> Self { // Changed to Arc<SessionContext>
         Self { ctx }
     }
 

@@ -1,105 +1,119 @@
 use super::*;
-use crate::storage::S3Manager;
 use crate::storage::s3::ObjectStorage;
 use common::{Error, Result};
-use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::prelude::*;
-use std::time::Duration;
-use tokio::time::sleep;
+use datafusion::arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use std::path::Path;
+use std::sync::Arc;
+use url::Url;
 
-pub struct StorageManager {}
+pub struct StorageManager {
+    storage: Arc<dyn ObjectStorage>,
+}
 
 impl StorageManager {
-    pub fn new(_s3_manager: Arc<S3Manager>) -> Self {
-        Self {}
+    pub fn new(storage: Arc<dyn ObjectStorage>) -> Self {
+        Self { storage }
     }
 
-    pub async fn store_data(
+    fn object_key_from_s3_path(&self, s3_path: &str) -> Result<String> {
+        let parsed_url = Url::parse(s3_path)?;
+
+        if parsed_url.scheme() != "s3" {
+            return Err(Error::InvalidInput(format!(
+                "Path '{}' is not an S3 path (expected scheme 's3')",
+                s3_path
+            )));
+        }
+
+        let key = parsed_url.path().trim_start_matches('/').to_string();
+
+        if key.is_empty() {
+            return Err(Error::InvalidInput(format!(
+                "S3 path '{}' results in an empty object key",
+                s3_path
+            )));
+        }
+
+        Ok(key)
+    }
+
+    pub async fn write_data(
         &self,
-        data: ProcessedData,
-        storage: &dyn ObjectStorage,
-        target_key: &str,
+        batches: Vec<RecordBatch>,
+        target_path: &str,
+        table_options: WriterProperties,
     ) -> Result<()> {
-        // Validate schema
-        self.validate_schema(&data.df).await?;
+        let mut buffer: Vec<u8> = Vec::new();
+        
+        let mut writer = ArrowWriter::try_new(
+            &mut buffer,
+            batches[0].schema(),
+            Some(table_options),
+        )?;
 
-        // Write data to parquet file
-        let target_url = format!("s3://{}/{}", storage.bucket(), target_key);
+        for batch in batches {
+            writer.write(&batch)?;
+        }
+        writer.close()?;
 
-        data.df
-            .write_parquet(
-                &target_url,
-                DataFrameWriteOptions::new(),
-                Some(data.parquet_options),
-            )
-            .await?;
-
-        // Verify file was written successfully
-        self.verify_file_exists(storage, target_key).await?;
+        let object_key = self.object_key_from_s3_path(target_path)?;
+        self.storage.put_object(&object_key, &buffer).await?;
+        println!("Bronze: Data written successfully to {}", target_path);
 
         Ok(())
     }
 
-    async fn verify_file_exists(
+    pub async fn write_marker(
         &self,
-        storage: &dyn ObjectStorage,
-        target_key: &str,
+        target_path: &str,
+        metadata: &DatasetMetadata,
+        metadata_ref: String,
     ) -> Result<()> {
-        // Clean up the key by removing any s3:// prefix and leading slashes
-        let clean_key = target_key
-            .strip_prefix("s3://")
-            .and_then(|s| s.split_once('/'))
-            .map(|(_, key)| key)
-            .unwrap_or(target_key)
-            .trim_start_matches('/');
+        let marker = MetadataMarker {
+            dataset_id: metadata.dataset_id.clone(),
+            metadata_ref,
+            created_at: Utc::now(),
+            schema_version: metadata.schema.version.clone(),
+            table_name: None,
+        };
+        let marker_json = serde_json::to_vec_pretty(&marker)?;
 
-        // Retry verification a few times with exponential backoff
-        for attempt in 1..=3 {
-            if storage.check_file_exists(clean_key).await? {
-                return Ok(());
-            }
+        let object_key = self.object_key_from_s3_path(target_path)?;
+        let target_dir = Path::new(&object_key)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "".to_string());
 
-            if attempt < 3 {
-                sleep(Duration::from_secs(2u64.pow(attempt))).await;
-            }
-        }
+        let marker_key = if target_dir.is_empty() {
+            "_SUCCESS".to_string()
+        } else {
+            format!("{}/{}", target_dir, "_SUCCESS")
+        };
 
-        Err(Error::Storage(format!(
-            "File not found after writing: {}",
-            target_key
-        )))
+        println!("Bronze: Writing marker to key: {}", marker_key);
+        self.storage.put_object(&marker_key, &marker_json).await?;
+        println!("Bronze: Marker file written successfully.");
+
+        Ok(())
     }
 
-    async fn validate_schema(&self, df: &DataFrame) -> Result<()> {
-        let schema = df.schema();
-
-        // Check required fields
-        let required_fields = [
-            "ingested_at",
-            "extraction_started_at",
-            "extraction_completed_at",
-        ];
-        for field in required_fields {
-            if !schema.fields().iter().any(|f| f.name() == field) {
-                return Err(Error::SchemaValidation(
-                    format!("Missing required field {} in bronze data", field).into(),
-                ));
-            }
-        }
-
-        // Validate no nulls in required fields
-        let null_count = df
-            .clone()
-            .filter(col("ingested_at").is_null())?
-            .count()
-            .await?;
-
-        if null_count > 0 {
-            return Err(Error::SchemaValidation(
-                format!("Found {} null values in ingested_at column", null_count).into(),
-            ));
-        }
-
+    // This is the high-level orchestration method that uses the other methods
+    pub async fn write_dataset(
+        &self,
+        batches: Vec<RecordBatch>,
+        target_path: &str,
+        metadata: &DatasetMetadata,
+        metadata_ref: String,
+        table_options: WriterProperties,
+    ) -> Result<()> {
+        // First write the data
+        self.write_data(batches, target_path, table_options).await?;
+        
+        // Then write the marker
+        self.write_marker(target_path, metadata, metadata_ref).await?;
+        
         Ok(())
     }
 }

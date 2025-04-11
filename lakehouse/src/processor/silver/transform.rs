@@ -11,11 +11,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 pub struct DataTransformer {
-    ctx: SessionContext,
+    ctx: Arc<SessionContext>,
 }
 
 impl DataTransformer {
-    pub fn new(ctx: SessionContext) -> Self {
+    pub fn new(ctx: Arc<SessionContext>) -> Self {
         Self { ctx }
     }
 
